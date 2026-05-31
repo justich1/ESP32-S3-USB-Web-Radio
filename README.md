@@ -20,15 +20,12 @@ Verze **2.15** přináší výrazné zlepšení práce s USB úložištěm, pře
 * USB remount a obsluha USB jsou méně blokující.
 * Webové ovládání pouze zařazuje příkazy do fronty a ihned vrací odpověď.
 * Přidána FTP podpora pro vytváření složek:
-
   * `MKD`
   * `XMKD`
 * Přidána FTP podpora pro mazání prázdných složek:
-
   * `RMD`
   * `XRMD`
 * Přidána FTP podpora pro přejmenování souborů a složek:
-
   * `RNFR`
   * `RNTO`
 * Přidáno přejmenování souborů a složek přímo z webového rozhraní.
