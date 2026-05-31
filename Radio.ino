@@ -10,7 +10,7 @@
 #include <PCMFlow.h>
 #include "EspUsbHost.h"
 
-#define USB_POWER_PIN -1  // tahle deska nema znamy GPIO power switch pro OTG VBUS
+#define USB_POWER_PIN -1
 
 // ============================================================
 // Nastavení
