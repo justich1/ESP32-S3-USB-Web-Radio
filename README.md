@@ -8,7 +8,7 @@ Internetové rádio a jednoduchý webový MP3 přehrávač pro **ESP32-S3** s US
 
 Projekt je určený hlavně jako praktické malé rádio / přehrávač / diagnostická hračka pro ESP32-S3 s PSRAM. Zvuk nejde přes DAC ani Bluetooth, ale přes **USB audio adaptér** připojený k USB hostu ESP32-S3.
 
-## 🇨🇿 Update v2.15 – multitasking, FTP správa souborů a web rename
+## Update v2.15 – multitasking, FTP správa souborů a web rename
 
 Verze **2.15** přináší výrazné zlepšení práce s USB úložištěm, přehráváním MP3 a internetovým rádiem. Hlavním cílem bylo zabránit tomu, aby kopírování souborů přes FTP nebo web blokovalo přehrávání.
 
