@@ -1,3 +1,5 @@
+// v.2.15
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <FFat.h>
@@ -7,8 +9,12 @@
 #include <ESPmDNS.h>
 #include <ctype.h>
 #include <string.h>
+#include <stdio.h>
 #include <PCMFlow.h>
 #include "EspUsbHost.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 #define USB_POWER_PIN -1
 
@@ -37,6 +43,40 @@ static String audioPath = "";
 static String audioStatus = "USB audio není připojeno";
 static PCMFormat audioOutputFormat = {48000, 2, 16};
 static constexpr float AUDIO_GAIN = 0.8f;
+
+// ============================================================
+// FreeRTOS multitasking / audio příkazy
+// ============================================================
+// Web handler jen zařadí příkaz do fronty a hned vrátí odpověď.
+// Těžké věci jako HTTP connect, prebuffer rádia, dekódování startu
+// nebo hledání další MP3 běží v audio tasku mimo hlavní web loop.
+
+enum AudioCommandType : uint8_t {
+  AUDIO_CMD_PLAY_FILE = 1,
+  AUDIO_CMD_PLAY_FOLDER,
+  AUDIO_CMD_PLAY_RADIO,
+  AUDIO_CMD_NEXT,
+  AUDIO_CMD_PREV,
+  AUDIO_CMD_STOP,
+  AUDIO_CMD_USB_REMOUNT
+};
+
+struct AudioCommand {
+  AudioCommandType type;
+  int index;
+  bool saveResume;
+  char disk[12];
+  char path[512];
+  char label[128];
+};
+
+QueueHandle_t audioCommandQueue = nullptr;
+TaskHandle_t audioTaskHandle = nullptr;
+TaskHandle_t usbTaskHandle = nullptr;
+volatile bool usbRemountRequested = false;
+
+static const uint8_t AUDIO_COMMAND_QUEUE_LEN = 8;
+
 
 uint8_t* audioFileBuffer = nullptr;
 size_t audioFileBufferSize = 0;
@@ -294,6 +334,7 @@ bool uploadActive = false;
 bool audioWasPlayingBeforeUpload = false;
 
 File uploadFile;
+uint32_t uploadLastFlushMs = 0;
 
 String currentDisk = "ffat";
 String uploadDiskName = "";
@@ -306,10 +347,32 @@ String playlistDir = "/";
 String playlistLastPath = "";
 
 
+
 String usbStatus = "USB host startuje";
 bool usbHostStarted = false;
 bool usbBootMountPending = false;
 uint32_t usbBootMountAfterMs = 0;
+
+uint32_t usbHostStartMs = 0;
+uint32_t usbLastDeviceEventMs = 0;
+
+static const uint32_t USB_STARTUP_MIN_MS   = 8000;
+static const uint32_t USB_STARTUP_QUIET_MS = 2500;
+static const uint32_t USB_STARTUP_MAX_MS   = 15000;
+
+bool usbStartupSettled() {
+  if (!usbHostStarted) {
+    return false;
+  }
+
+  uint32_t now = millis();
+
+  bool minDone = (now - usbHostStartMs) >= USB_STARTUP_MIN_MS;
+  bool quietDone = (now - usbLastDeviceEventMs) >= USB_STARTUP_QUIET_MS;
+  bool maxDone = (now - usbHostStartMs) >= USB_STARTUP_MAX_MS;
+
+  return maxDone || (minDone && quietDone);
+}
 
 bool mdnsStarted = false;
 bool mdnsStartedWithSta = false;
@@ -545,6 +608,15 @@ String bytesHuman(uint64_t b) {
 
 void pollUsbMount();
 bool startRadioStream(const String& url);
+void stopAudioPlayback(const String& reason);
+void serviceAudioPump();
+void startBackgroundTasks();
+bool queueAudioFilePlay(const String& disk, const String& path);
+bool queueAudioFolderPlay(const String& disk, const String& dirPath);
+bool queueAudioRadioPlay(int idx, const String& url, const String& label, bool saveResume);
+bool queueAudioSimple(AudioCommandType type);
+bool enqueueAudioCommand(const AudioCommand& cmd);
+void processAudioCommand(const AudioCommand& cmd);
 
 // ============================================================
 // mDNS / stav rádia / jednorázový USB mount
@@ -679,6 +751,9 @@ void loadRadioResumeState() {
 }
 
 void serviceRadioResume() {
+  if (!usbStartupSettled()) {
+    return;
+  }
   if (!radioResumeWanted || radioResumeAttempted || audioPlaying || uploadActive) {
     return;
   }
@@ -715,19 +790,21 @@ void serviceRadioResume() {
   }
 
   radioResumeAttempted = true;
-  Serial.println("Radio autostart: " + url);
 
-  if (startRadioStream(url)) {
-    String station = url;
-    if (idx >= 0 && idx < MAX_RADIO_STATIONS && cfg.radioName[idx].length() > 0) {
-      station = cfg.radioName[idx];
-    }
+  String station = url;
+  if (idx >= 0 && idx < MAX_RADIO_STATIONS && cfg.radioName[idx].length() > 0) {
+    station = cfg.radioName[idx];
+  }
 
-    audioStatus = "Webradio: " + station;
-    radioStatus = "Hraje: " + station;
-    saveRadioResumeState(true, idx, url);
+  Serial.println("Radio autostart queued: " + url);
+
+  if (queueAudioRadioPlay(idx, url, station, true)) {
+    audioStatus = "Webradio: startuji " + station;
+    radioStatus = audioStatus;
   } else {
-    Serial.println("Radio autostart failed: " + audioStatus);
+    audioStatus = "Radio autostart: fronta je plná";
+    radioStatus = audioStatus;
+    Serial.println(audioStatus);
   }
 }
 
@@ -736,11 +813,19 @@ void serviceUsbBootMountOnce() {
     return;
   }
 
-  if (millis() < usbBootMountAfterMs) {
+  if (!usbStartupSettled()) {
     return;
   }
 
   usbBootMountPending = false;
+
+  Serial.printf(
+    "USB startup settled: total=%lu ms, quiet=%lu ms, audioReady=%u, mounting MSC...\n",
+    (unsigned long)(millis() - usbHostStartMs),
+    (unsigned long)(millis() - usbLastDeviceEventMs),
+    audioReady ? 1 : 0
+  );
+
   pollUsbMount();
 }
 
@@ -1030,6 +1115,7 @@ void initUsbHost() {
   Serial.println("Starting USB host...");
 
   usb.onDeviceConnected([](const EspUsbHostDeviceInfo &device) {
+    usbLastDeviceEventMs = millis();
     Serial.println();
     Serial.print("connected: ");
     espUsbHostPrint(device);
@@ -1041,6 +1127,7 @@ void initUsbHost() {
   });
 
   usb.onDeviceDisconnected([](const EspUsbHostDeviceInfo &device) {
+    usbLastDeviceEventMs = millis();
     Serial.println();
     Serial.print("disconnected: ");
     espUsbHostPrint(device);
@@ -1103,6 +1190,9 @@ void initUsbHost() {
   }
 
   usbHostStarted = true;
+  usbHostStartMs = millis();
+  usbLastDeviceEventMs = usbHostStartMs;
+
   usbStatus = "USB host aktivní, čekám na FAT32 flashku";
   Serial.println(usbStatus);
 }
@@ -1284,7 +1374,7 @@ bool startAudioFile(const String& disk, const String& path) {
       break;
     }
 
-    delay(0);
+    delay(1);
   }
 
   size_t preFrames = audio.availableFrames();
@@ -1981,7 +2071,7 @@ bool startRadioStream(const String& url) {
       break;
     }
 
-    delay(0);
+    delay(1);
   }
 
   size_t preFrames = audio.availableFrames();
@@ -2028,6 +2118,151 @@ bool startRadioStream(const String& url) {
 
   Serial.println("Radio playback started");
   return true;
+}
+
+void copyCommandText(char *dst, size_t dstSize, const String& value) {
+  if (!dst || dstSize == 0) {
+    return;
+  }
+
+  String tmp = value;
+  tmp.trim();
+  strncpy(dst, tmp.c_str(), dstSize - 1);
+  dst[dstSize - 1] = '\0';
+}
+
+bool enqueueAudioCommand(const AudioCommand& cmd) {
+  if (!audioCommandQueue) {
+    audioStatus = "Audio task není spuštěný";
+    return false;
+  }
+
+  return xQueueSend(audioCommandQueue, &cmd, 0) == pdTRUE;
+}
+
+bool queueAudioFilePlay(const String& disk, const String& path) {
+  AudioCommand cmd = {};
+  cmd.type = AUDIO_CMD_PLAY_FILE;
+  copyCommandText(cmd.disk, sizeof(cmd.disk), disk);
+  copyCommandText(cmd.path, sizeof(cmd.path), path);
+  return enqueueAudioCommand(cmd);
+}
+
+bool queueAudioFolderPlay(const String& disk, const String& dirPath) {
+  AudioCommand cmd = {};
+  cmd.type = AUDIO_CMD_PLAY_FOLDER;
+  copyCommandText(cmd.disk, sizeof(cmd.disk), disk);
+  copyCommandText(cmd.path, sizeof(cmd.path), dirPath);
+  return enqueueAudioCommand(cmd);
+}
+
+bool queueAudioRadioPlay(int idx, const String& url, const String& label, bool saveResume) {
+  AudioCommand cmd = {};
+  cmd.type = AUDIO_CMD_PLAY_RADIO;
+  cmd.index = idx;
+  cmd.saveResume = saveResume;
+  copyCommandText(cmd.path, sizeof(cmd.path), url);
+  copyCommandText(cmd.label, sizeof(cmd.label), label);
+  return enqueueAudioCommand(cmd);
+}
+
+bool queueAudioSimple(AudioCommandType type) {
+  AudioCommand cmd = {};
+  cmd.type = type;
+  return enqueueAudioCommand(cmd);
+}
+
+void processAudioCommand(const AudioCommand& cmd) {
+  switch (cmd.type) {
+    case AUDIO_CMD_PLAY_FILE: {
+      playlistActive = false;
+      String disk = String(cmd.disk);
+      String path = String(cmd.path);
+      audioStatus = "Soubor: startuji " + path;
+      if (!startAudioFile(disk, path)) {
+        Serial.println("Audio file start failed: " + audioStatus);
+      }
+      break;
+    }
+
+    case AUDIO_CMD_PLAY_FOLDER: {
+      String disk = String(cmd.disk);
+      String dirPath = String(cmd.path);
+      audioStatus = "Playlist: startuji " + dirPath;
+      if (!startPlaylistFolder(disk, dirPath)) {
+        Serial.println("Playlist start failed: " + audioStatus);
+      }
+      break;
+    }
+
+    case AUDIO_CMD_PLAY_RADIO: {
+      String url = String(cmd.path);
+      String label = String(cmd.label);
+      if (label.length() == 0) {
+        label = url;
+      }
+
+      audioStatus = "Webradio: startuji " + label;
+      radioStatus = audioStatus;
+
+      if (startRadioStream(url)) {
+        audioStatus = "Webradio: " + label;
+        radioStatus = "Hraje: " + label;
+        if (cmd.saveResume) {
+          saveRadioResumeState(true, cmd.index, url);
+        }
+      } else {
+        Serial.println("Radio start failed: " + audioStatus);
+      }
+      break;
+    }
+
+    case AUDIO_CMD_NEXT:
+      if (!playlistActive) {
+        audioStatus = "Playlist není aktivní";
+      } else if (!playNextPlaylistTrack()) {
+        Serial.println("Playlist next failed: " + audioStatus);
+      }
+      break;
+
+    case AUDIO_CMD_PREV:
+      if (!playlistActive) {
+        audioStatus = "Playlist není aktivní";
+      } else if (!playPrevPlaylistTrack()) {
+        audioStatus = "Předchozí skladba není dostupná";
+        Serial.println(audioStatus);
+      }
+      break;
+
+    case AUDIO_CMD_STOP:
+      playlistActive = false;
+      stopAudioPlayback("Zastaveno");
+      saveRadioResumeState(false, -1, "");
+      break;
+
+    case AUDIO_CMD_USB_REMOUNT:
+      playlistActive = false;
+      stopAudioPlayback("Audio zastaveno kvůli USB remountu");
+      usbRemountRequested = true;
+      break;
+
+    default:
+      break;
+  }
+}
+
+void serviceAudioCommandQueue() {
+  if (!audioCommandQueue) {
+    return;
+  }
+
+  AudioCommand cmd;
+  uint8_t processed = 0;
+
+  while (processed < 3 && xQueueReceive(audioCommandQueue, &cmd, 0) == pdTRUE) {
+    processAudioCommand(cmd);
+    processed++;
+  }
 }
 
 uint32_t rgbWheel(uint8_t pos) {
@@ -2188,6 +2423,26 @@ bool fsRmdirGeneric(const String& disk, const String& path) {
 
   if (disk == "usb0") {
     return usbMassStorage.rmdir(path.c_str());
+  }
+
+  return false;
+}
+
+bool fsRenameGeneric(const String& disk, const String& fromPath, const String& toPath) {
+  if (fromPath == "/" || toPath == "/" || fromPath == toPath) {
+    return false;
+  }
+
+  if (disk == "ffat") {
+    return FFat.rename(fromPath.c_str(), toPath.c_str());
+  }
+
+  if (disk == "usb0") {
+    // USB MSC je připojené do VFS jako /usb, proto rename řešíme přes POSIX rename().
+    // Je to bezpečnější než spoléhat na to, že konkrétní verze EspUsbHostMscFS má metodu rename().
+    String fromFsPath = "/usb" + fromPath;
+    String toFsPath = "/usb" + toPath;
+    return ::rename(fromFsPath.c_str(), toFsPath.c_str()) == 0;
   }
 
   return false;
@@ -2578,7 +2833,7 @@ void ftpDoList(bool namesOnly, String arg) {
       }
       file.close();
       file = root.openNextFile();
-      delay(0);
+      delay(1);
     }
   } else {
     if (namesOnly) {
@@ -2592,6 +2847,17 @@ void ftpDoList(bool namesOnly, String arg) {
   root.close();
   ftpCloseData();
   ftpReply("226 Transfer complete.");
+}
+
+
+void ftpTransferYield(uint32_t &lastYieldMs) {
+  uint32_t now = millis();
+  if (now - lastYieldMs >= 2) {
+    // FTP běží v hlavním loopu, audio/USB běží ve vlastních FreeRTOS taskech.
+    // Krátké uvolnění CPU zabrání tomu, aby dlouhé kopírování zadusilo dekodér.
+    vTaskDelay(pdMS_TO_TICKS(1));
+    lastYieldMs = millis();
+  }
 }
 
 void ftpDoRetr(String arg) {
@@ -2618,10 +2884,11 @@ void ftpDoRetr(String arg) {
   ftpReply("150 Opening binary mode data connection.");
 
   uint8_t buf[1460];
+  uint32_t lastYieldMs = millis();
   while (file.available() && ftpDataClient.connected()) {
     size_t n = file.read(buf, sizeof(buf));
     if (n) ftpDataClient.write(buf, n);
-    delay(0);
+    ftpTransferYield(lastYieldMs);
   }
 
   file.close();
@@ -2657,6 +2924,7 @@ void ftpDoStor(String arg) {
 
   uint8_t buf[1460];
   unsigned long lastData = millis();
+  uint32_t lastYieldMs = millis();
 
   while (ftpDataClient.connected() || ftpDataClient.available()) {
     int avail = ftpDataClient.available();
@@ -2665,10 +2933,11 @@ void ftpDoStor(String arg) {
       if (n) {
         file.write(buf, n);
         lastData = millis();
+        ftpTransferYield(lastYieldMs);
       }
     } else {
       if (millis() - lastData > 2000) break;
-      delay(1);
+      ftpTransferYield(lastYieldMs);
     }
   }
 
@@ -2690,6 +2959,107 @@ void ftpDoSize(String arg) {
 
   ftpReply("213 " + String((unsigned long)file.size()));
   file.close();
+}
+
+void ftpDoMkd(String arg) {
+  String disk = ftpDisk();
+  String path = ftpResolvePath(arg);
+
+  if (!diskAvailable(disk)) {
+    ftpReply("550 FTP disk not available.");
+    return;
+  }
+
+  if (!safePath(path) || path == "/" || fsExistsGeneric(disk, path)) {
+    ftpReply("550 Bad or existing directory name.");
+    return;
+  }
+
+  if (fsMkdirGeneric(disk, path)) {
+    ftpReply("257 \"" + path + "\" directory created.");
+  } else {
+    ftpReply("550 Create directory failed.");
+  }
+}
+
+void ftpDoRmd(String arg) {
+  String disk = ftpDisk();
+  String path = ftpResolvePath(arg);
+
+  if (!diskAvailable(disk)) {
+    ftpReply("550 FTP disk not available.");
+    return;
+  }
+
+  File d = fsOpenGeneric(disk, path, FILE_READ);
+  bool isDir = d && d.isDirectory();
+  if (d) d.close();
+
+  if (!isDir || path == "/") {
+    ftpReply("550 Directory not found.");
+    return;
+  }
+
+  if (fsRmdirGeneric(disk, path)) {
+    ftpReply("250 Directory removed.");
+  } else {
+    ftpReply("550 Remove directory failed. Directory may not be empty.");
+  }
+}
+
+void ftpDoRnfr(String arg) {
+  String disk = ftpDisk();
+  String path = ftpResolvePath(arg);
+
+  if (!diskAvailable(disk)) {
+    ftpReply("550 FTP disk not available.");
+    return;
+  }
+
+  if (!safePath(path) || path == "/" || !fsExistsGeneric(disk, path)) {
+    ftpRenameFrom = "";
+    ftpReply("550 File or directory not found.");
+    return;
+  }
+
+  ftpRenameFrom = path;
+  ftpReply("350 Ready for RNTO.");
+}
+
+void ftpDoRnto(String arg) {
+  if (ftpRenameFrom.length() == 0) {
+    ftpReply("503 RNFR required first.");
+    return;
+  }
+
+  String disk = ftpDisk();
+  String toPath = ftpResolvePath(arg);
+
+  if (!diskAvailable(disk)) {
+    ftpRenameFrom = "";
+    ftpReply("550 FTP disk not available.");
+    return;
+  }
+
+  if (!safePath(toPath) || toPath == "/" || fsExistsGeneric(disk, toPath)) {
+    ftpRenameFrom = "";
+    ftpReply("550 Bad or existing target name.");
+    return;
+  }
+
+  if (parentPath(ftpRenameFrom) != parentPath(toPath)) {
+    ftpRenameFrom = "";
+    ftpReply("550 Rename across directories is disabled.");
+    return;
+  }
+
+  if (fsRenameGeneric(disk, ftpRenameFrom, toPath)) {
+    ftpRenameFrom = "";
+    ftpReply("250 Rename successful.");
+  } else {
+    ftpRenameFrom = "";
+    ftpReply("550 Rename failed.");
+  }
 }
 
 void ftpDoCommand(String line) {
@@ -2731,7 +3101,7 @@ void ftpDoCommand(String line) {
   }
 
   if (cmd == "SYST") ftpReply("215 UNIX Type: L8");
-  else if (cmd == "FEAT") ftpReply("211-Features\r\n PASV\r\n SIZE\r\n UTF8\r\n211 End");
+  else if (cmd == "FEAT") ftpReply("211-Features\r\n PASV\r\n SIZE\r\n MKD\r\n RMD\r\n RNFR\r\n RNTO\r\n UTF8\r\n211 End");
   else if (cmd == "OPTS") ftpReply("200 OK");
   else if (cmd == "TYPE") ftpReply("200 Type set.");
   else if (cmd == "NOOP") ftpReply("200 OK");
@@ -2778,13 +3148,10 @@ void ftpDoCommand(String line) {
     if (fsRemoveGeneric(ftpDisk(), p)) ftpReply("250 Deleted.");
     else ftpReply("550 Delete failed.");
   }
-  else if (cmd == "MKD" || cmd == "XMKD") {
-    // EspUsbHostMscFS nemusí mkdir spolehlivě podporovat přes stejné API, nechávám bezpečně vypnuté.
-    ftpReply("502 MKD not implemented.");
-  }
-  else if (cmd == "RMD" || cmd == "XRMD") {
-    ftpReply("502 RMD not implemented.");
-  }
+  else if (cmd == "MKD" || cmd == "XMKD") ftpDoMkd(arg);
+  else if (cmd == "RMD" || cmd == "XRMD") ftpDoRmd(arg);
+  else if (cmd == "RNFR") ftpDoRnfr(arg);
+  else if (cmd == "RNTO") ftpDoRnto(arg);
   else {
     ftpReply("502 Command not implemented.");
   }
@@ -2802,11 +3169,10 @@ void handleAudioPlay() {
   }
 
   playlistActive = false;
+  audioStatus = "Soubor: startuji " + path;
 
-  bool ok = startAudioFile(disk, path);
-
-  if (!ok) {
-    server.send(500, "text/plain", audioStatus);
+  if (!queueAudioFilePlay(disk, path)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
     return;
   }
 
@@ -2825,10 +3191,10 @@ void handleAudioPlayFolder() {
   String dirPath = server.hasArg("p") ? server.arg("p") : "/";
   dirPath = normalizeDirPath(dirPath);
 
-  bool ok = startPlaylistFolder(disk, dirPath);
+  audioStatus = "Playlist: startuji " + dirPath;
 
-  if (!ok) {
-    server.send(500, "text/plain", audioStatus);
+  if (!queueAudioFolderPlay(disk, dirPath)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
     return;
   }
 
@@ -2845,8 +3211,10 @@ void handleAudioNext() {
     return;
   }
 
-  if (!playNextPlaylistTrack()) {
-    server.send(500, "text/plain", audioStatus);
+  audioStatus = "Playlist: další skladba...";
+
+  if (!queueAudioSimple(AUDIO_CMD_NEXT)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
     return;
   }
 
@@ -2861,8 +3229,10 @@ void handleAudioPrev() {
     return;
   }
 
-  if (!playPrevPlaylistTrack()) {
-    server.send(500, "text/plain", "Předchozí skladba není dostupná");
+  audioStatus = "Playlist: předchozí skladba...";
+
+  if (!queueAudioSimple(AUDIO_CMD_PREV)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
     return;
   }
 
@@ -2887,9 +3257,15 @@ void handleAudioStop() {
   if (!checkWebAuth()) return;
 
   playlistActive = false;
-  stopAudioPlayback("Zastaveno");
+  audioStatus = "Zastavuji...";
   saveRadioResumeState(false, -1, "");
-  server.send(200, "text/plain", "Zastaveno");
+
+  if (!queueAudioSimple(AUDIO_CMD_STOP)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
+    return;
+  }
+
+  server.send(200, "text/plain", "Zastavuji...");
 }
 
 void handleAudioVolume() {
@@ -2916,9 +3292,15 @@ void handleAudioStopAjax() {
   if (!checkWebAuth()) return;
 
   playlistActive = false;
-  stopAudioPlayback("Zastaveno");
+  audioStatus = "Zastavuji...";
   saveRadioResumeState(false, -1, "");
-  server.send(200, "text/plain", "Zastaveno");
+
+  if (!queueAudioSimple(AUDIO_CMD_STOP)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
+    return;
+  }
+
+  server.send(200, "text/plain", "Zastavuji...");
 }
 
 String audioSidePanelHtml() {
@@ -3237,6 +3619,42 @@ function stopAudioAjax() {
     .then(function(r) { return r.text(); })
     .then(function(t) { updateAudioLabels(t || 'Zastaveno'); })
     .catch(function() { alert('Stop selhal'); });
+  return false;
+}
+
+function renameEntry(disk, encodedPath, encodedReturnPath, encodedOldName) {
+  const oldName = decodeURIComponent(encodedOldName || '');
+  const newName = prompt('Nový název:', oldName);
+  if (newName === null) return false;
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === oldName) return false;
+  if (trimmed.indexOf('/') >= 0 || trimmed.indexOf('\\') >= 0 || trimmed.indexOf('..') >= 0) {
+    alert('Název nesmí obsahovat /, \\ ani ..');
+    return false;
+  }
+
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '/rename';
+  form.style.display = 'none';
+
+  const fields = {
+    disk: disk,
+    f: decodeURIComponent(encodedPath || ''),
+    p: decodeURIComponent(encodedReturnPath || '/'),
+    name: trimmed
+  };
+
+  Object.keys(fields).forEach(function(k) {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = k;
+    input.value = fields[k];
+    form.appendChild(input);
+  });
+
+  document.body.appendChild(form);
+  form.submit();
   return false;
 }
 </script>
@@ -3738,6 +4156,7 @@ void appendFilesTable(String& html, const String& disk, const String& dirPath) {
 
     if (file.isDirectory()) {
       html += "<a href='/files?disk=" + disk + "&p=" + enc + "'>otevřít</a>";
+      html += "<a href='#' onclick=\"return renameEntry('" + disk + "','" + enc + "','" + encDir + "','" + urlEncode(shownName) + "')\">rename</a>";
       html += "<a href='/delete?disk=" + disk + "&f=" + enc + "&p=" + encDir + "' onclick='return confirm(\"Smazat složku včetně obsahu?\")'>delete</a>";
     } else {
       String ext = fileExt(shownName);
@@ -3755,6 +4174,7 @@ void appendFilesTable(String& html, const String& disk, const String& dirPath) {
       }
 
       html += "<a href='/download?disk=" + disk + "&f=" + enc + "'>download</a>";
+      html += "<a href='#' onclick=\"return renameEntry('" + disk + "','" + enc + "','" + encDir + "','" + urlEncode(shownName) + "')\">rename</a>";
       html += "<a href='/delete?disk=" + disk + "&f=" + enc + "&p=" + encDir + "' onclick='return confirm(\"Smazat soubor?\")'>delete</a>";
     }
 
@@ -4188,17 +4608,15 @@ void handleUploadData() {
 
   if (upload.status == UPLOAD_FILE_START) {
     uploadActive = true;
+    audioWasPlayingBeforeUpload = audioPlaying;
 
     if (audioPlaying) {
-      audioWasPlayingBeforeUpload = true;
-      audioPlaying = false;
-      audio.close();
-      audioStatus = "Audio zastaveno kvůli uploadu";
-    } else {
-      audioWasPlayingBeforeUpload = false;
+      Serial.println("Upload bezi paralelne s audiem");
+      audioStatus = radioPlaying ? "Webradio hraje + upload" : "MP3 hraje + upload";
     }
 
     uploadDiskName = disk;
+    uploadLastFlushMs = millis();
 
     String filename = upload.filename;
     String fullPath = joinPath(dirPath, filename);
@@ -4236,8 +4654,12 @@ void handleUploadData() {
         );
       }
 
-      uploadFile.flush();
-      delay(1);
+      if (millis() - uploadLastFlushMs > 1000) {
+        uploadFile.flush();
+        uploadLastFlushMs = millis();
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 
@@ -4250,6 +4672,7 @@ void handleUploadData() {
     Serial.printf("Upload end: %u bytes\n", upload.totalSize);
 
     uploadDiskName = "";
+    uploadLastFlushMs = 0;
     uploadActive = false;
     audioWasPlayingBeforeUpload = false;
   }
@@ -4262,9 +4685,50 @@ void handleUploadData() {
     Serial.println("Upload aborted");
 
     uploadDiskName = "";
+    uploadLastFlushMs = 0;
     uploadActive = false;
     audioWasPlayingBeforeUpload = false;
   }
+}
+
+void handleRename() {
+  String disk = server.arg("disk");
+  String returnPath = server.hasArg("p") ? server.arg("p") : "/";
+  String oldPath = server.arg("f");
+  String newName = server.arg("name");
+
+  if (disk != "ffat" && disk != "usb0") disk = "ffat";
+  returnPath = normalizeDirPath(returnPath);
+  newName.trim();
+
+  if (!diskAvailable(disk)) {
+    server.send(404, "text/plain", "Disk not available");
+    return;
+  }
+
+  if (!safePath(oldPath) || oldPath == "/" || !fsExistsGeneric(disk, oldPath)) {
+    server.send(400, "text/plain", "Bad source path");
+    return;
+  }
+
+  if (newName.length() == 0 || newName.indexOf('/') >= 0 || newName.indexOf('\\') >= 0 || newName.indexOf("..") >= 0) {
+    server.send(400, "text/plain", "Bad new name");
+    return;
+  }
+
+  String newPath = joinPath(parentPath(oldPath), newName);
+  if (newPath.length() == 0 || fsExistsGeneric(disk, newPath)) {
+    server.send(400, "text/plain", "Bad or existing target name");
+    return;
+  }
+
+  if (!fsRenameGeneric(disk, oldPath, newPath)) {
+    server.send(500, "text/plain", "Rename failed");
+    return;
+  }
+
+  server.sendHeader("Location", "/files?disk=" + disk + "&p=" + urlEncode(returnPath));
+  server.send(303);
 }
 
 void handleMkdir() {
@@ -4392,16 +4856,13 @@ void handleUsbRemount() {
   uploadActive = false;
   audioWasPlayingBeforeUpload = false;
 
-  if (audioPlaying) {
-    audioPlaying = false;
-    audio.close();
-    audioStatus = "Audio zastaveno kvůli USB remountu";
+  audioStatus = "USB remount zařazen";
+  usbStatus = "USB remount čeká ve frontě";
+
+  if (!queueAudioSimple(AUDIO_CMD_USB_REMOUNT)) {
+    server.send(503, "text/plain", "Audio fronta je plná, USB remount neproveden");
+    return;
   }
-
-  usbMassStorage.end();
-  usbStatus = "USB remount vyžádán";
-
-  pollUsbMount();
 
   server.sendHeader("Location", "/files?disk=usb0");
   server.send(303);
@@ -4504,17 +4965,14 @@ void handleRadioPlay() {
     return;
   }
 
-  bool ok = startRadioStream(cfg.radioUrl[idx]);
+  String station = cfg.radioName[idx].length() ? cfg.radioName[idx] : cfg.radioUrl[idx];
+  audioStatus = "Webradio: startuji " + station;
+  radioStatus = audioStatus;
 
-  if (!ok) {
-    server.send(500, "text/plain", audioStatus);
+  if (!queueAudioRadioPlay(idx, cfg.radioUrl[idx], station, true)) {
+    server.send(503, "text/plain", "Audio fronta je plná");
     return;
   }
-
-  String station = cfg.radioName[idx].length() ? cfg.radioName[idx] : cfg.radioUrl[idx];
-  audioStatus = "Webradio: " + station;
-  radioStatus = "Hraje: " + station;
-  saveRadioResumeState(true, idx, cfg.radioUrl[idx]);
 
   server.send(200, "text/plain", audioStatus);
 }
@@ -4546,6 +5004,7 @@ void setupRoutes() {
 
   server.on("/download", HTTP_GET, []() { if (checkWebAuth()) handleDownload(); });
   server.on("/delete", HTTP_GET, []() { if (checkWebAuth()) handleDelete(); });
+  server.on("/rename", HTTP_POST, []() { if (checkWebAuth()) handleRename(); });
   server.on("/mkdir", HTTP_POST, []() { if (checkWebAuth()) handleMkdir(); });
   server.on("/create", HTTP_POST, []() { if (checkWebAuth()) handleCreateFile(); });
   server.on("/format", HTTP_POST, []() { if (checkWebAuth()) handleFormat(); });
@@ -4631,18 +5090,20 @@ void setup() {
 
   initUsbHost();
   usbBootMountPending = true;
-  usbBootMountAfterMs = millis() + 1500;
+  usbBootMountAfterMs = 0;
   ftpStartServerIfNeeded();
 
   setupRoutes();
 
   server.begin();
   Serial.println("Web server started");
+
+  startBackgroundTasks();
 }
 
 
 void serviceAudioPump() {
-  if (uploadActive || !audioPlaying) {
+  if (!audioPlaying) {
     return;
   }
 
@@ -4673,7 +5134,7 @@ void serviceAudioPump() {
     for (uint8_t i = 0; i < pumps; i++) {
       audio.pump();
       audioPumpCount++;
-      delay(0);
+      taskYIELD();
     }
 
     uint32_t now = millis();
@@ -4726,7 +5187,7 @@ void serviceAudioPump() {
     for (uint8_t i = 0; i < pumps; i++) {
       audio.pump();
       audioPumpCount++;
-      delay(0);
+      taskYIELD();
     }
 
     uint32_t now = millis();
@@ -4749,23 +5210,94 @@ void serviceAudioPump() {
     }
   }
 }
+
+void audioServiceTask(void *param) {
+  (void)param;
+
+  for (;;) {
+    serviceAudioCommandQueue();
+    serviceAudioPump();
+    updateMusicRgbLed();
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+}
+
+void usbServiceTask(void *param) {
+  (void)param;
+
+  for (;;) {
+    serviceUsbBootMountOnce();
+
+    if (usbRemountRequested) {
+      usbRemountRequested = false;
+      usbStatus = "USB remount vyžádán";
+      usbMassStorage.end();
+      pollUsbMount();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+void startBackgroundTasks() {
+  if (!audioCommandQueue) {
+    audioCommandQueue = xQueueCreate(AUDIO_COMMAND_QUEUE_LEN, sizeof(AudioCommand));
+  }
+
+  if (!audioCommandQueue) {
+    Serial.println("Audio command queue create FAILED");
+    audioStatus = "Audio frontu se nepodařilo vytvořit";
+    return;
+  }
+
+  if (!audioTaskHandle) {
+    BaseType_t ok = xTaskCreatePinnedToCore(
+      audioServiceTask,
+      "audioSvc",
+      12288,
+      nullptr,
+      2,
+      &audioTaskHandle,
+      APP_CPU_NUM
+    );
+
+    if (ok != pdPASS) {
+      Serial.println("Audio task create FAILED");
+      audioTaskHandle = nullptr;
+      audioStatus = "Audio task se nepodařilo spustit";
+    }
+  }
+
+  if (!usbTaskHandle) {
+    BaseType_t ok = xTaskCreatePinnedToCore(
+      usbServiceTask,
+      "usbSvc",
+      4096,
+      nullptr,
+      1,
+      &usbTaskHandle,
+      PRO_CPU_NUM
+    );
+
+    if (ok != pdPASS) {
+      Serial.println("USB task create FAILED");
+      usbTaskHandle = nullptr;
+      usbStatus = "USB task se nepodařilo spustit";
+    }
+  }
+}
+
 void loop() {
-  // Audio musí mít přednost, hlavně u rádia.
-  serviceAudioPump();
-
   server.handleClient();
-  serviceAudioPump();
-
   ftpHandle();
-  serviceAudioPump();
 
-  serviceUsbBootMountOnce();
+  if (!usbTaskHandle) {
+    serviceUsbBootMountOnce();
+  }
+
   serviceMdns();
   serviceRadioResume();
   serviceAudioVolumeSave();
-  serviceAudioPump();
 
-  updateMusicRgbLed();
-
-  delay(0);
+  delay(1);
 }
