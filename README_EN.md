@@ -8,6 +8,30 @@ An internet radio and simple web-based MP3 player for **ESP32-S3** with USB audi
 
 This project is mainly intended as a small practical radio / player / diagnostic toy for ESP32-S3 boards with PSRAM. Audio is not sent through DAC or Bluetooth. It is sent through a **USB audio adapter** connected to the ESP32-S3 USB host port.
 
+## Update v2.15 – multitasking, FTP file management and web rename
+
+Version **2.15** brings major improvements to USB storage handling, MP3 playback and internet radio playback. The main goal was to prevent FTP or web file transfers from blocking audio playback.
+
+### What’s new
+
+* Added basic multitasking using FreeRTOS tasks.
+* Audio playback now runs separately from the main web/FTP handling code.
+* Radio and MP3 playback should no longer stop when transferring files over FTP.
+* USB remount and USB handling are less blocking.
+* Web controls now only enqueue audio commands and return a response immediately.
+* Added FTP support for creating folders:
+  * `MKD`
+  * `XMKD`
+* Added FTP support for removing empty folders:
+  * `RMD`
+  * `XRMD`
+* Added FTP support for renaming files and folders:
+  * `RNFR`
+  * `RNTO`
+* Added file and folder rename support directly in the web interface.
+* Added the `/rename` web endpoint.
+* Upload handling no longer flushes every single data block, but only periodically and at the end of the transfer.
+
 ## Features
 
 - **AP + STA** Wi-Fi mode
