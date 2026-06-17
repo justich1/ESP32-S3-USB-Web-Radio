@@ -1,4 +1,4 @@
-// v.2.15
+// v.2.16
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -12,11 +12,31 @@
 #include <stdio.h>
 #include <PCMFlow.h>
 #include "EspUsbHost.h"
+#include "driver/i2s.h"
+#include "esp_err.h"
+#include "esp_idf_version.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
-#define USB_POWER_PIN -1
+#define USB_POWER_PIN -1  // tahle deska nema znamy GPIO power switch pro OTG VBUS
+
+// ============================================================
+// HW piny pro verzi s PCM5102 I2S DAC + rotační enkodér
+// ============================================================
+// GPIO19/20 nech volné pro USB-OTG flashku. GPIO48 už používá RGB LED.
+// Když má tvoje deska jiné vyvedené piny, změň jen tyto define.
+#define I2S_AUDIO_PORT I2S_NUM_0
+#define I2S_BCK_PIN    4    // PCM5102 BCK / BCLK
+#define I2S_LRCK_PIN   5    // PCM5102 LCK / LRCK / WS
+#define I2S_DOUT_PIN   6    // PCM5102 DIN
+#define I2S_MUTE_PIN   -1   // volitelné: pin na MUTE/EN zesilovače, -1 = nepoužito
+
+#define ENCODER_S1_PIN   7   // LaskaKit S1 / A / CLK
+#define ENCODER_S2_PIN   15  // LaskaKit S2 / B / DT
+#define ENCODER_KEY_PIN  16  // LaskaKit Key / SW
+#define ENCODER_VOLUME_STEP 2
+
 
 // ============================================================
 // Nastavení
@@ -35,12 +55,19 @@ EspUsbHostMscFS usbMassStorage;
 
 PCMFlow audio;
 
+enum AudioOutputKind : uint8_t {
+  AUDIO_OUTPUT_NONE = 0,
+  AUDIO_OUTPUT_I2S,
+  AUDIO_OUTPUT_USB
+};
+
 static uint8_t audioAddress = 0;
+static AudioOutputKind activeAudioOutput = AUDIO_OUTPUT_NONE;
 static bool audioReady = false;
 static bool audioPlaying = false;
 static String audioDisk = "";
 static String audioPath = "";
-static String audioStatus = "USB audio není připojeno";
+static String audioStatus = "Audio výstup startuje";
 static PCMFormat audioOutputFormat = {48000, 2, 16};
 static constexpr float AUDIO_GAIN = 0.8f;
 
@@ -58,6 +85,7 @@ enum AudioCommandType : uint8_t {
   AUDIO_CMD_NEXT,
   AUDIO_CMD_PREV,
   AUDIO_CMD_STOP,
+  AUDIO_CMD_TOGGLE_PAUSE,
   AUDIO_CMD_USB_REMOUNT
 };
 
@@ -248,6 +276,20 @@ uint32_t lastAudioDebugMs = 0;
 uint8_t rgbHue = 0;
 uint32_t lastRgbLedMs = 0;
 
+bool i2sAudioStarted = false;
+bool audioPaused = false;
+int16_t i2sOutBuffer[256 * 2]; // 256 stereo framů, 16 bit
+
+int encoderLastAB = 0;
+int encoderMoveAccum = 0;
+bool encoderBtnRawDown = false;
+bool encoderBtnStableDown = false;
+uint32_t encoderBtnRawChangedMs = 0;
+uint32_t encoderBtnDownMs = 0;
+uint32_t encoderLastClickMs = 0;
+uint8_t encoderClickCount = 0;
+bool encoderLongFired = false;
+
 void freeRadioPreBuffer() {
   if (radioPreBuffer) {
     free(radioPreBuffer);
@@ -271,6 +313,7 @@ int findMp3StartOffset(const uint8_t *buf, size_t len) {
 
   return -1;
 }
+
 
 bool fillRadioPreBuffer(WiFiClient &client, size_t targetBytes, size_t maxBytes) {
   freeRadioPreBuffer();
@@ -346,6 +389,56 @@ String playlistDisk = "";
 String playlistDir = "/";
 String playlistLastPath = "";
 
+// ============================================================
+// Karaoke režim: audio hraje ESP, text kreslí web podle JSONu
+// ============================================================
+bool karaokeActive = false;
+String karaokeDisk = "";
+String karaokeJsonPath = "";
+String karaokeAudioPath = "";
+String karaokeTitle = "";
+
+uint32_t audioStartedMs = 0;
+uint32_t audioPausedAtMs = 0;
+uint32_t audioPausedAccumMs = 0;
+
+void clearKaraokeState() {
+  karaokeActive = false;
+  karaokeDisk = "";
+  karaokeJsonPath = "";
+  karaokeAudioPath = "";
+  karaokeTitle = "";
+}
+
+void markAudioPositionStart() {
+  audioStartedMs = millis();
+  audioPausedAtMs = 0;
+  audioPausedAccumMs = 0;
+}
+
+void markAudioPositionStop() {
+  audioStartedMs = 0;
+  audioPausedAtMs = 0;
+  audioPausedAccumMs = 0;
+}
+
+uint32_t currentAudioPositionMs() {
+  if (audioStartedMs == 0) {
+    return 0;
+  }
+
+  uint32_t now = audioPaused ? audioPausedAtMs : millis();
+  if (now < audioStartedMs) {
+    return 0;
+  }
+
+  uint32_t raw = now - audioStartedMs;
+  if (raw <= audioPausedAccumMs) {
+    return 0;
+  }
+
+  return raw - audioPausedAccumMs;
+}
 
 
 String usbStatus = "USB host startuje";
@@ -399,7 +492,7 @@ static const uint8_t MAX_RADIO_STATIONS = 6;
 static const size_t RADIO_PREBUFFER_TARGET_BYTES = 65536;      // kolik MP3 dat přednačíst z HTTP
 static const size_t RADIO_PREBUFFER_MAX_BYTES    = 131072;     // max PSRAM prebuffer pro start dekodéru
 static const size_t RADIO_PCM_BUFFER_FRAMES      = 24576;      // PCMFlow ring buffer
-static const size_t RADIO_DECODER_START_FRAMES   = 8192;       // kolik PCM framů mít před spuštěním USB audio
+static const size_t RADIO_DECODER_START_FRAMES   = 8192;       // kolik PCM framů mít před spuštěním I2S audio
 static const uint32_t RADIO_PREBUFFER_TIMEOUT_MS = 10000;      // čekání na naplnění PCM bufferu
 
 // Lokální MP3 z flashky/FFat už nečteme celé do PSRAM.
@@ -604,6 +697,32 @@ String bytesHuman(uint64_t b) {
   return String(buf);
 }
 
+String uptimeHuman() {
+  uint32_t sec = millis() / 1000UL;
+  uint32_t days = sec / 86400UL;
+  sec %= 86400UL;
+  uint8_t hours = sec / 3600UL;
+  sec %= 3600UL;
+  uint8_t minutes = sec / 60UL;
+  uint8_t seconds = sec % 60UL;
+
+  char buf[32];
+  if (days > 0) {
+    sprintf(buf, "%ud %02u:%02u:%02u", (unsigned)days, hours, minutes, seconds);
+  } else {
+    sprintf(buf, "%02u:%02u:%02u", hours, minutes, seconds);
+  }
+  return String(buf);
+}
+
+String jsonEscape(String s) {
+  s.replace("\\", "\\\\");
+  s.replace("\"", "\\\"");
+  s.replace("\n", "\\n");
+  s.replace("\r", "\\r");
+  s.replace("\t", "\\t");
+  return s;
+}
 
 
 void pollUsbMount();
@@ -617,6 +736,19 @@ bool queueAudioRadioPlay(int idx, const String& url, const String& label, bool s
 bool queueAudioSimple(AudioCommandType type);
 bool enqueueAudioCommand(const AudioCommand& cmd);
 void processAudioCommand(const AudioCommand& cmd);
+void clearKaraokeState();
+uint32_t currentAudioPositionMs();
+void handleKaraokePage();
+void handleKaraokeListJson();
+void handleKaraokePlay();
+bool initI2sAudioOutput();
+void serviceI2sAudioOutput();
+const char* audioOutputKindName();
+void activateI2sAudioOutput(const String& status);
+void deactivateAudioOutput(const String& status);
+void initEncoderControl();
+void serviceEncoderControl();
+void toggleAudioPauseInternal();
 
 // ============================================================
 // mDNS / stav rádia / jednorázový USB mount
@@ -766,7 +898,7 @@ void serviceRadioResume() {
     return;
   }
 
-  if (!audioReady || audioAddress == 0) {
+  if (!audioReady) {
     return;
   }
 
@@ -1061,6 +1193,42 @@ bool isUsbDiskName(const String& disk) {
   return disk == "usb0";
 }
 
+const char* audioOutputKindName() {
+  switch (activeAudioOutput) {
+    case AUDIO_OUTPUT_I2S: return "I2S PCM5102";
+    case AUDIO_OUTPUT_USB: return "USB zvukovka";
+    default: return "žádný";
+  }
+}
+
+void deactivateAudioOutput(const String& status) {
+  activeAudioOutput = AUDIO_OUTPUT_NONE;
+  audioAddress = 0;
+  audioReady = false;
+  audioStatus = status.length() ? status : String("Audio výstup není připravený");
+}
+
+void activateI2sAudioOutput(const String& status) {
+  if (!i2sAudioStarted) {
+    deactivateAudioOutput(status.length() ? status : String("I2S audio není připravené"));
+    return;
+  }
+
+  activeAudioOutput = AUDIO_OUTPUT_I2S;
+  audioAddress = 0;
+  audioOutputFormat = {48000, 2, 16};
+  audioReady = true;
+  audioStatus = status.length() ? status : String("I2S audio připraveno");
+}
+
+bool activeOutputIsUsb() {
+  return activeAudioOutput == AUDIO_OUTPUT_USB && audioAddress != 0;
+}
+
+bool activeOutputIsI2s() {
+  return activeAudioOutput == AUDIO_OUTPUT_I2S && i2sAudioStarted;
+}
+
 bool chooseAudioOutputStream(uint8_t address) {
   EspUsbHostAudioStreamInfo streams[ESP_USB_HOST_MAX_AUDIO_STREAMS];
 
@@ -1080,11 +1248,21 @@ bool chooseAudioOutputStream(uint8_t address) {
     espUsbHostSelectAudioOutputStream(streams, count);
 
   if (!selected) {
-    audioStatus = "USB audio stream nenalezen";
+    if (i2sAudioStarted) {
+      activateI2sAudioOutput("USB zvukovka bez vhodného výstupu, používám I2S");
+    } else {
+      deactivateAudioOutput("USB audio stream nenalezen");
+    }
     return false;
   }
 
   const EspUsbHostAudioStreamInfo &stream = streams[selected.index];
+
+  // Přepnutí výstupu za běhu by mohlo rozhodit PCM buffer, proto aktuální
+  // přehrávání raději zastavíme a další play už pojede do nového výstupu.
+  if (audioPlaying) {
+    stopAudioPlayback("Audio výstup přepnut na USB zvukovku");
+  }
 
   audioOutputFormat = {
     selected.sampleRate,
@@ -1100,13 +1278,18 @@ bool chooseAudioOutputStream(uint8_t address) {
   );
 
   if (!usb.audioOutputStart(stream, selected.sampleRate, address)) {
-    audioStatus = "USB audioOutputStart selhal";
+    if (i2sAudioStarted) {
+      activateI2sAudioOutput("USB audioOutputStart selhal, používám I2S");
+    } else {
+      deactivateAudioOutput("USB audioOutputStart selhal");
+    }
     return false;
   }
 
   audioAddress = address;
+  activeAudioOutput = AUDIO_OUTPUT_USB;
   audioReady = true;
-  audioStatus = "USB audio připraveno";
+  audioStatus = "USB zvukovka připravena";
 
   return true;
 }
@@ -1120,10 +1303,13 @@ void initUsbHost() {
     Serial.print("connected: ");
     espUsbHostPrint(device);
     Serial.println();
-      if (usb.audioOutputReady(device.address)) {
-        Serial.println("USB audio output ready candidate");
-        chooseAudioOutputStream(device.address);
-      }
+
+    // Výstup je AUTO: pokud se najde USB zvukovka, dostane přednost.
+    // Když USB audio není, zůstává aktivní I2S/PCM5102.
+    if (usb.audioOutputReady(device.address)) {
+      Serial.println("USB audio output ready candidate");
+      chooseAudioOutputStream(device.address);
+    }
   });
 
   usb.onDeviceDisconnected([](const EspUsbHostDeviceInfo &device) {
@@ -1136,17 +1322,23 @@ void initUsbHost() {
     usbMassStorage.end();
     usbStatus = "USB disk odpojen";
 
-    if (device.address == audioAddress) {
+    if (activeAudioOutput == AUDIO_OUTPUT_USB && audioAddress != 0 && device.address == audioAddress) {
       audioAddress = 0;
-      audioReady = false;
-      audioPlaying = false;
-      audio.close();
-      audioStatus = "USB audio odpojeno";
+
+      if (audioPlaying) {
+        stopAudioPlayback("USB zvukovka odpojena");
+      }
+
+      if (i2sAudioStarted) {
+        activateI2sAudioOutput("USB zvukovka odpojena, používám I2S");
+      } else {
+        deactivateAudioOutput("USB audio odpojeno");
+      }
     }
   });
 
   usb.onAudioOutputRequest([](EspUsbHostAudioOutputRequest &request) {
-    if (!audioPlaying) {
+    if (!activeOutputIsUsb() || !audioPlaying || audioPaused) {
       request.writtenFrames = 0;
       audioCbCount++;
       audioCbUnderruns++;
@@ -1296,9 +1488,151 @@ void applyAudioVolume() {
   audio.setGain(currentAudioGain());
 }
 
+
+bool initI2sAudioOutput() {
+  if (i2sAudioStarted) {
+    if (activeAudioOutput != AUDIO_OUTPUT_USB) {
+      activateI2sAudioOutput("I2S audio připraveno");
+    }
+    return true;
+  }
+
+#if I2S_MUTE_PIN >= 0
+  pinMode(I2S_MUTE_PIN, OUTPUT);
+  digitalWrite(I2S_MUTE_PIN, LOW);
+#endif
+
+  audioOutputFormat = {48000, 2, 16};
+
+  i2s_config_t i2sCfg = {};
+  i2sCfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  i2sCfg.sample_rate = audioOutputFormat.sampleRate;
+  i2sCfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  i2sCfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+#if defined(I2S_COMM_FORMAT_STAND_I2S)
+  i2sCfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#else
+  i2sCfg.communication_format = I2S_COMM_FORMAT_I2S;
+#endif
+  i2sCfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  i2sCfg.dma_buf_count = 8;
+  i2sCfg.dma_buf_len = 256;
+  i2sCfg.use_apll = false;
+  i2sCfg.tx_desc_auto_clear = true;
+  i2sCfg.fixed_mclk = 0;
+
+  esp_err_t err = i2s_driver_install(I2S_AUDIO_PORT, &i2sCfg, 0, nullptr);
+  if (err != ESP_OK) {
+    audioReady = false;
+    audioStatus = String("I2S driver install selhal: ") + esp_err_to_name(err);
+    Serial.println(audioStatus);
+    return false;
+  }
+
+  i2s_pin_config_t pinCfg = {};
+#if ESP_IDF_VERSION_MAJOR >= 5
+  pinCfg.mck_io_num = I2S_PIN_NO_CHANGE;
+#endif
+  pinCfg.bck_io_num = I2S_BCK_PIN;
+  pinCfg.ws_io_num = I2S_LRCK_PIN;
+  pinCfg.data_out_num = I2S_DOUT_PIN;
+  pinCfg.data_in_num = I2S_PIN_NO_CHANGE;
+
+  err = i2s_set_pin(I2S_AUDIO_PORT, &pinCfg);
+  if (err != ESP_OK) {
+    i2s_driver_uninstall(I2S_AUDIO_PORT);
+    audioReady = false;
+    audioStatus = String("I2S piny selhaly: ") + esp_err_to_name(err);
+    Serial.println(audioStatus);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(I2S_AUDIO_PORT);
+  i2sAudioStarted = true;
+  if (activeAudioOutput != AUDIO_OUTPUT_USB) {
+    activateI2sAudioOutput("I2S audio připraveno");
+  }
+  Serial.printf(
+    "I2S audio ready: BCK=%d LRCK=%d DOUT=%d %lu Hz %u ch %u-bit\n",
+    I2S_BCK_PIN,
+    I2S_LRCK_PIN,
+    I2S_DOUT_PIN,
+    (unsigned long)audioOutputFormat.sampleRate,
+    audioOutputFormat.channels,
+    audioOutputFormat.bitsPerSample
+  );
+
+#if I2S_MUTE_PIN >= 0
+  digitalWrite(I2S_MUTE_PIN, HIGH);
+#endif
+
+  return true;
+}
+
+void serviceI2sAudioOutput() {
+  if (!activeOutputIsI2s() || !audioPlaying || audioPaused) {
+    return;
+  }
+
+  size_t available = audio.availableFrames();
+  if (available == 0) {
+    return;
+  }
+
+  const size_t maxFrames = sizeof(i2sOutBuffer) / (sizeof(int16_t) * 2);
+  size_t frames = available;
+  if (frames > maxFrames) frames = maxFrames;
+
+  size_t readFrames = audio.readFrames(i2sOutBuffer, frames);
+  if (readFrames == 0) {
+    audioCbCount++;
+    audioCbUnderruns++;
+    return;
+  }
+
+  const size_t channels = audioOutputFormat.channels > 0 ? audioOutputFormat.channels : 2;
+  const size_t bytesPerSample = audioOutputFormat.bitsPerSample / 8;
+  size_t bytesToWrite = readFrames * channels * bytesPerSample;
+  size_t bytesWritten = 0;
+
+  esp_err_t err = i2s_write(
+    I2S_AUDIO_PORT,
+    i2sOutBuffer,
+    bytesToWrite,
+    &bytesWritten,
+    pdMS_TO_TICKS(10)
+  );
+
+  audioCbCount++;
+  audioCbFrames += bytesWritten / (channels * bytesPerSample);
+
+  if (err != ESP_OK || bytesWritten == 0) {
+    audioCbUnderruns++;
+  }
+
+  if (bytesWritten > 0 && audioOutputFormat.bitsPerSample == 16) {
+    int16_t *samples = (int16_t *)i2sOutBuffer;
+    size_t sampleCount = bytesWritten / sizeof(int16_t);
+    uint32_t sum = 0;
+    size_t step = sampleCount > 96 ? sampleCount / 96 : 1;
+    size_t counted = 0;
+
+    for (size_t i = 0; i < sampleCount; i += step) {
+      int32_t v = samples[i];
+      if (v < 0) v = -v;
+      sum += (uint32_t)v;
+      counted++;
+    }
+
+    if (counted > 0) {
+      audioLevel = (uint16_t)(sum / counted);
+    }
+  }
+}
+
 bool startAudioFile(const String& disk, const String& path) {
-  if (!audioReady || audioAddress == 0) {
-    audioStatus = "USB zvukovka není připravená";
+  if (!audioReady) {
+    audioStatus = "Audio výstup není připravený";
     return false;
   }
 
@@ -1346,6 +1680,8 @@ bool startAudioFile(const String& disk, const String& path) {
   audioStatus = "Soubor: bufferuji...";
   audioDisk = disk;
   audioPath = path;
+  audioPaused = false;
+  markAudioPositionStart();
   radioPlaying = false;
 
   audioCbCount = 0;
@@ -1413,10 +1749,17 @@ bool startAudioFile(const String& disk, const String& path) {
   return true;
 }
 
-bool findFirstMp3InFolder(const String& disk, const String& dirPath, String& pathOut) {
-  pathOut = "";
 
-  if (!diskAvailable(disk)) {
+static const uint8_t AUDIO_PLAYLIST_SCAN_MAX_DEPTH = 10;
+
+bool isMp3Path(const String& path) {
+  String lower = fileNameFromPath(path);
+  lower.toLowerCase();
+  return lower.endsWith(".mp3");
+}
+
+bool findFirstMp3Recursive(const String& disk, const String& dirPath, String& pathOut, uint8_t depth) {
+  if (depth > AUDIO_PLAYLIST_SCAN_MAX_DEPTH) {
     return false;
   }
 
@@ -1427,19 +1770,19 @@ bool findFirstMp3InFolder(const String& disk, const String& dirPath, String& pat
   }
 
   File file = root.openNextFile();
-
   while (file) {
     bool isDir = file.isDirectory();
     String rawName = file.name();
     file.close();
 
-    if (!isDir) {
-      String shownName = displayNameForEntry(dirPath, rawName);
-      String fullPath = fullPathForEntry(dirPath, rawName);
-      String lower = shownName;
-      lower.toLowerCase();
-
-      if (fullPath.length() > 0 && lower.endsWith(".mp3")) {
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        if (findFirstMp3Recursive(disk, fullPath, pathOut, depth + 1)) {
+          root.close();
+          return true;
+        }
+      } else if (isMp3Path(fullPath)) {
         pathOut = fullPath;
         root.close();
         return true;
@@ -1453,13 +1796,12 @@ bool findFirstMp3InFolder(const String& disk, const String& dirPath, String& pat
   return false;
 }
 
-bool findLastMp3InFolder(const String& disk, const String& dirPath, String& pathOut) {
-  pathOut = "";
-
-  if (!diskAvailable(disk)) {
+bool findLastMp3Recursive(const String& disk, const String& dirPath, String& pathOut, uint8_t depth) {
+  if (depth > AUDIO_PLAYLIST_SCAN_MAX_DEPTH) {
     return false;
   }
 
+  bool found = false;
   File root = fsOpenGeneric(disk, dirPath, FILE_READ);
   if (!root || !root.isDirectory()) {
     if (root) root.close();
@@ -1467,20 +1809,20 @@ bool findLastMp3InFolder(const String& disk, const String& dirPath, String& path
   }
 
   File file = root.openNextFile();
-
   while (file) {
     bool isDir = file.isDirectory();
     String rawName = file.name();
     file.close();
 
-    if (!isDir) {
-      String shownName = displayNameForEntry(dirPath, rawName);
-      String fullPath = fullPathForEntry(dirPath, rawName);
-      String lower = shownName;
-      lower.toLowerCase();
-
-      if (fullPath.length() > 0 && lower.endsWith(".mp3")) {
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        if (findLastMp3Recursive(disk, fullPath, pathOut, depth + 1)) {
+          found = true;
+        }
+      } else if (isMp3Path(fullPath)) {
         pathOut = fullPath;
+        found = true;
       }
     }
 
@@ -1488,13 +1830,11 @@ bool findLastMp3InFolder(const String& disk, const String& dirPath, String& path
   }
 
   root.close();
-  return pathOut.length() > 0;
+  return found;
 }
 
-bool findNextMp3InFolder(const String& disk, const String& dirPath, const String& afterPath, String& nextPath) {
-  nextPath = "";
-
-  if (!diskAvailable(disk)) {
+bool findNextMp3Recursive(const String& disk, const String& dirPath, const String& afterPath, bool& takeNext, String& nextPath, uint8_t depth) {
+  if (depth > AUDIO_PLAYLIST_SCAN_MAX_DEPTH) {
     return false;
   }
 
@@ -1504,21 +1844,20 @@ bool findNextMp3InFolder(const String& disk, const String& dirPath, const String
     return false;
   }
 
-  bool takeNext = afterPath.length() == 0;
   File file = root.openNextFile();
-
   while (file) {
     bool isDir = file.isDirectory();
     String rawName = file.name();
     file.close();
 
-    if (!isDir) {
-      String shownName = displayNameForEntry(dirPath, rawName);
-      String fullPath = fullPathForEntry(dirPath, rawName);
-      String lower = shownName;
-      lower.toLowerCase();
-
-      if (fullPath.length() > 0 && lower.endsWith(".mp3")) {
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        if (findNextMp3Recursive(disk, fullPath, afterPath, takeNext, nextPath, depth + 1)) {
+          root.close();
+          return true;
+        }
+      } else if (isMp3Path(fullPath)) {
         if (takeNext) {
           nextPath = fullPath;
           root.close();
@@ -1538,10 +1877,8 @@ bool findNextMp3InFolder(const String& disk, const String& dirPath, const String
   return false;
 }
 
-bool findPrevMp3InFolder(const String& disk, const String& dirPath, const String& beforePath, String& prevPath) {
-  prevPath = "";
-
-  if (!diskAvailable(disk)) {
+bool findPrevMp3Recursive(const String& disk, const String& dirPath, const String& beforePath, String& lastSeen, String& prevPath, uint8_t depth) {
+  if (depth > AUDIO_PLAYLIST_SCAN_MAX_DEPTH) {
     return false;
   }
 
@@ -1551,21 +1888,20 @@ bool findPrevMp3InFolder(const String& disk, const String& dirPath, const String
     return false;
   }
 
-  String lastSeen = "";
   File file = root.openNextFile();
-
   while (file) {
     bool isDir = file.isDirectory();
     String rawName = file.name();
     file.close();
 
-    if (!isDir) {
-      String shownName = displayNameForEntry(dirPath, rawName);
-      String fullPath = fullPathForEntry(dirPath, rawName);
-      String lower = shownName;
-      lower.toLowerCase();
-
-      if (fullPath.length() > 0 && lower.endsWith(".mp3")) {
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        if (findPrevMp3Recursive(disk, fullPath, beforePath, lastSeen, prevPath, depth + 1)) {
+          root.close();
+          return true;
+        }
+      } else if (isMp3Path(fullPath)) {
         if (fullPath == beforePath) {
           prevPath = lastSeen;
           root.close();
@@ -1583,32 +1919,28 @@ bool findPrevMp3InFolder(const String& disk, const String& dirPath, const String
   return false;
 }
 
-uint16_t countMp3InFolder(const String& disk, const String& dirPath) {
-  if (!diskAvailable(disk)) {
-    return 0;
+void countMp3Recursive(const String& disk, const String& dirPath, uint16_t& count, uint8_t depth) {
+  if (depth > AUDIO_PLAYLIST_SCAN_MAX_DEPTH || count == 0xFFFF) {
+    return;
   }
 
   File root = fsOpenGeneric(disk, dirPath, FILE_READ);
   if (!root || !root.isDirectory()) {
     if (root) root.close();
-    return 0;
+    return;
   }
 
-  uint16_t count = 0;
   File file = root.openNextFile();
-
-  while (file) {
+  while (file && count < 0xFFFF) {
     bool isDir = file.isDirectory();
     String rawName = file.name();
     file.close();
 
-    if (!isDir) {
-      String shownName = displayNameForEntry(dirPath, rawName);
-      String fullPath = fullPathForEntry(dirPath, rawName);
-      String lower = shownName;
-      lower.toLowerCase();
-
-      if (fullPath.length() > 0 && lower.endsWith(".mp3")) {
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        countMp3Recursive(disk, fullPath, count, depth + 1);
+      } else if (isMp3Path(fullPath)) {
         count++;
       }
     }
@@ -1617,6 +1949,98 @@ uint16_t countMp3InFolder(const String& disk, const String& dirPath) {
   }
 
   root.close();
+}
+
+bool findMp3ByIndexRecursive(const String& disk, const String& dirPath, uint16_t target, uint16_t& index, String& pathOut, uint8_t depth) {
+  if (depth > AUDIO_PLAYLIST_SCAN_MAX_DEPTH) {
+    return false;
+  }
+
+  File root = fsOpenGeneric(disk, dirPath, FILE_READ);
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return false;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    bool isDir = file.isDirectory();
+    String rawName = file.name();
+    file.close();
+
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        if (findMp3ByIndexRecursive(disk, fullPath, target, index, pathOut, depth + 1)) {
+          root.close();
+          return true;
+        }
+      } else if (isMp3Path(fullPath)) {
+        if (index == target) {
+          pathOut = fullPath;
+          root.close();
+          return true;
+        }
+        index++;
+      }
+    }
+
+    file = root.openNextFile();
+  }
+
+  root.close();
+  return false;
+}
+
+bool findFirstMp3InFolder(const String& disk, const String& dirPath, String& pathOut) {
+  pathOut = "";
+
+  if (!diskAvailable(disk)) {
+    return false;
+  }
+
+  return findFirstMp3Recursive(disk, dirPath, pathOut, 0);
+}
+
+bool findLastMp3InFolder(const String& disk, const String& dirPath, String& pathOut) {
+  pathOut = "";
+
+  if (!diskAvailable(disk)) {
+    return false;
+  }
+
+  return findLastMp3Recursive(disk, dirPath, pathOut, 0);
+}
+
+bool findNextMp3InFolder(const String& disk, const String& dirPath, const String& afterPath, String& nextPath) {
+  nextPath = "";
+
+  if (!diskAvailable(disk)) {
+    return false;
+  }
+
+  bool takeNext = afterPath.length() == 0;
+  return findNextMp3Recursive(disk, dirPath, afterPath, takeNext, nextPath, 0);
+}
+
+bool findPrevMp3InFolder(const String& disk, const String& dirPath, const String& beforePath, String& prevPath) {
+  prevPath = "";
+
+  if (!diskAvailable(disk)) {
+    return false;
+  }
+
+  String lastSeen = "";
+  return findPrevMp3Recursive(disk, dirPath, beforePath, lastSeen, prevPath, 0);
+}
+
+uint16_t countMp3InFolder(const String& disk, const String& dirPath) {
+  if (!diskAvailable(disk)) {
+    return 0;
+  }
+
+  uint16_t count = 0;
+  countMp3Recursive(disk, dirPath, count, 0);
   return count;
 }
 
@@ -1631,42 +2055,14 @@ bool findRandomMp3InFolder(const String& disk, const String& dirPath, const Stri
   for (uint8_t attempt = 0; attempt < 4; attempt++) {
     uint16_t target = (uint16_t)random(count);
     uint16_t idx = 0;
+    String candidate = "";
 
-    File root = fsOpenGeneric(disk, dirPath, FILE_READ);
-    if (!root || !root.isDirectory()) {
-      if (root) root.close();
-      return false;
-    }
-
-    File file = root.openNextFile();
-    while (file) {
-      bool isDir = file.isDirectory();
-      String rawName = file.name();
-      file.close();
-
-      if (!isDir) {
-        String shownName = displayNameForEntry(dirPath, rawName);
-        String fullPath = fullPathForEntry(dirPath, rawName);
-        String lower = shownName;
-        lower.toLowerCase();
-
-        if (fullPath.length() > 0 && lower.endsWith(".mp3")) {
-          if (idx == target) {
-            root.close();
-            if (count == 1 || fullPath != avoidPath) {
-              randomPath = fullPath;
-              return true;
-            }
-            break;
-          }
-          idx++;
-        }
+    if (findMp3ByIndexRecursive(disk, dirPath, target, idx, candidate, 0)) {
+      if (count == 1 || candidate != avoidPath) {
+        randomPath = candidate;
+        return true;
       }
-
-      file = root.openNextFile();
     }
-
-    root.close();
   }
 
   return findNextMp3InFolder(disk, dirPath, avoidPath, randomPath) ||
@@ -1770,7 +2166,12 @@ bool playPrevPlaylistTrack() {
 
 void stopAudioPlayback(const String& reason) {
   audioPlaying = false;
+  audioPaused = false;
+  markAudioPositionStop();
   radioPlaying = false;
+  if (activeOutputIsI2s()) {
+    i2s_zero_dma_buffer(I2S_AUDIO_PORT);
+  }
   audio.close();
   if (audioStreamFile) {
     audioStreamFile.close();
@@ -1960,8 +2361,8 @@ void closeRadioStream() {
 }
 
 bool startRadioStream(const String& url) {
-  if (!audioReady || audioAddress == 0) {
-    audioStatus = "USB zvukovka není připravená";
+  if (!audioReady) {
+    audioStatus = "Audio výstup není připravený";
     radioStatus = audioStatus;
     return false;
   }
@@ -2045,6 +2446,8 @@ bool startRadioStream(const String& url) {
 
   audioStatus = "Webradio: bufferuji...";
   radioStatus = "Bufferuji: " + url;
+  audioPaused = false;
+  markAudioPositionStart();
 
   audioCbCount = 0;
   audioCbFrames = 0;
@@ -2188,7 +2591,8 @@ void processAudioCommand(const AudioCommand& cmd) {
     case AUDIO_CMD_PLAY_FOLDER: {
       String disk = String(cmd.disk);
       String dirPath = String(cmd.path);
-      audioStatus = "Playlist: startuji " + dirPath;
+      clearKaraokeState();
+  audioStatus = "Playlist: startuji " + dirPath;
       if (!startPlaylistFolder(disk, dirPath)) {
         Serial.println("Playlist start failed: " + audioStatus);
       }
@@ -2196,6 +2600,11 @@ void processAudioCommand(const AudioCommand& cmd) {
     }
 
     case AUDIO_CMD_PLAY_RADIO: {
+      // Prepiname na radio, tak uz nesmi zustat aktivni USB playlist.
+      // Jinak dvojklik na enkoderu porad skoci na dalsi MP3 misto dalsi stanice.
+      playlistActive = false;
+      clearKaraokeState();
+
       String url = String(cmd.path);
       String label = String(cmd.label);
       if (label.length() == 0) {
@@ -2236,12 +2645,18 @@ void processAudioCommand(const AudioCommand& cmd) {
 
     case AUDIO_CMD_STOP:
       playlistActive = false;
+      clearKaraokeState();
       stopAudioPlayback("Zastaveno");
       saveRadioResumeState(false, -1, "");
       break;
 
+    case AUDIO_CMD_TOGGLE_PAUSE:
+      toggleAudioPauseInternal();
+      break;
+
     case AUDIO_CMD_USB_REMOUNT:
       playlistActive = false;
+      clearKaraokeState();
       stopAudioPlayback("Audio zastaveno kvůli USB remountu");
       usbRemountRequested = true;
       break;
@@ -2249,6 +2664,274 @@ void processAudioCommand(const AudioCommand& cmd) {
     default:
       break;
   }
+}
+
+
+void toggleAudioPauseInternal() {
+  if (audioPaused) {
+    if (audioPausedAtMs > 0) {
+      audioPausedAccumMs += millis() - audioPausedAtMs;
+      audioPausedAtMs = 0;
+    }
+    audioPaused = false;
+    audioPlaying = true;
+    audioStatus = radioPlaying ? "Radio: pokračuji" : "Přehrávání pokračuje";
+    if (radioPlaying) {
+      radioStatus = "Radio pokračuje";
+    }
+    return;
+  }
+
+  if (!audioPlaying) {
+    audioStatus = "Není co pozastavit";
+    return;
+  }
+
+  audioPaused = true;
+  audioPausedAtMs = millis();
+  audioPlaying = false;
+  audioStatus = "Pauza";
+  if (radioPlaying) {
+    radioStatus = "Radio pauza";
+  }
+
+  if (i2sAudioStarted) {
+    i2s_zero_dma_buffer(I2S_AUDIO_PORT);
+  }
+}
+
+int readEncoderAB() {
+  int a = digitalRead(ENCODER_S1_PIN) ? 1 : 0;
+  int b = digitalRead(ENCODER_S2_PIN) ? 1 : 0;
+  return (a << 1) | b;
+}
+
+void setHardwareVolumeDelta(int delta) {
+  int v = cfg.audioVolume + delta;
+  if (v < 0) v = 0;
+  if (v > 100) v = 100;
+
+  if (v == cfg.audioVolume) {
+    return;
+  }
+
+  cfg.audioVolume = v;
+  applyAudioVolume();
+  requestAudioVolumeSave();
+  Serial.printf("Encoder volume: %d %%\n", cfg.audioVolume);
+}
+
+bool queueConfiguredRadioStation(int idx) {
+  if (idx < 0 || idx >= MAX_RADIO_STATIONS) {
+    return false;
+  }
+
+  String url = cfg.radioUrl[idx];
+  url.trim();
+  if (url.length() == 0) {
+    return false;
+  }
+
+  String label = cfg.radioName[idx];
+  label.trim();
+  if (label.length() == 0) {
+    label = url;
+  }
+
+  audioPaused = false;
+  audioStatus = "Webradio: startuji " + label;
+  return queueAudioRadioPlay(idx, url, label, true);
+}
+
+bool queueFirstConfiguredRadioStation() {
+  for (int i = 0; i < MAX_RADIO_STATIONS; i++) {
+    if (queueConfiguredRadioStation(i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool queueNextConfiguredRadioStation() {
+  int current = -1;
+
+  if (radioUrlActive.length() > 0) {
+    for (int i = 0; i < MAX_RADIO_STATIONS; i++) {
+      if (cfg.radioUrl[i] == radioUrlActive) {
+        current = i;
+        break;
+      }
+    }
+  }
+
+  if (current < 0 && radioResumeIndex >= 0 && radioResumeIndex < MAX_RADIO_STATIONS) {
+    current = radioResumeIndex;
+  }
+
+  for (int offset = 1; offset <= MAX_RADIO_STATIONS; offset++) {
+    int idx = (current + offset + MAX_RADIO_STATIONS) % MAX_RADIO_STATIONS;
+    if (queueConfiguredRadioStation(idx)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void handleEncoderSingleClick() {
+  if (!queueAudioSimple(AUDIO_CMD_TOGGLE_PAUSE)) {
+    audioStatus = "Audio fronta je plná";
+  }
+}
+
+void handleEncoderDoubleClick() {
+  audioPaused = false;
+
+  if (karaokeActive) {
+    audioStatus = "Karaoke: další skladbu vyber na webu";
+    return;
+  }
+
+  if (playlistActive) {
+    audioStatus = "Playlist: další skladba...";
+    if (!queueAudioSimple(AUDIO_CMD_NEXT)) {
+      audioStatus = "Audio fronta je plná";
+    }
+    return;
+  }
+
+  if (!queueNextConfiguredRadioStation()) {
+    audioStatus = "Není nastavená další rádio stanice";
+  }
+}
+
+void handleEncoderLongPress() {
+  audioPaused = false;
+
+  if (karaokeActive) {
+    if (!queueFirstConfiguredRadioStation()) {
+      audioStatus = "Není nastavené žádné rádio";
+    }
+    return;
+  }
+
+  if (playlistActive && playlistDisk == "usb0") {
+    if (!queueFirstConfiguredRadioStation()) {
+      audioStatus = "Není nastavené žádné rádio";
+    }
+    return;
+  }
+
+  if (!usbDiskMounted()) {
+    audioStatus = "USB flashka není připojená";
+    return;
+  }
+
+  audioStatus = "USB: prohledávám flashku a přehrávám MP3 včetně podsložek...";
+  if (!queueAudioFolderPlay("usb0", "/")) {
+    audioStatus = "USB playlist se nepodařilo zařadit";
+  }
+}
+
+void initEncoderControl() {
+  pinMode(ENCODER_S1_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_S2_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_KEY_PIN, INPUT_PULLUP);
+
+  encoderLastAB = readEncoderAB();
+  encoderMoveAccum = 0;
+
+  encoderBtnRawDown = (digitalRead(ENCODER_KEY_PIN) == LOW);
+  encoderBtnStableDown = encoderBtnRawDown;
+  encoderBtnRawChangedMs = millis();
+  encoderBtnDownMs = encoderBtnStableDown ? millis() : 0;
+  encoderClickCount = 0;
+  encoderLongFired = false;
+
+  Serial.printf(
+    "Encoder ready: S1=%d S2=%d KEY=%d step=%d\n",
+    ENCODER_S1_PIN,
+    ENCODER_S2_PIN,
+    ENCODER_KEY_PIN,
+    ENCODER_VOLUME_STEP
+  );
+}
+
+void serviceEncoderRotation() {
+  static const int8_t table[16] = {
+     0, -1,  1,  0,
+     1,  0,  0, -1,
+    -1,  0,  0,  1,
+     0,  1, -1,  0
+  };
+
+  int ab = readEncoderAB();
+  if (ab == encoderLastAB) {
+    return;
+  }
+
+  int idx = (encoderLastAB << 2) | ab;
+  encoderLastAB = ab;
+
+  int8_t delta = table[idx & 0x0F];
+  if (delta == 0) {
+    return;
+  }
+
+  encoderMoveAccum += delta;
+  if (encoderMoveAccum >= 4) {
+    encoderMoveAccum = 0;
+    setHardwareVolumeDelta(ENCODER_VOLUME_STEP);
+  } else if (encoderMoveAccum <= -4) {
+    encoderMoveAccum = 0;
+    setHardwareVolumeDelta(-ENCODER_VOLUME_STEP);
+  }
+}
+
+void serviceEncoderButton() {
+  const uint32_t now = millis();
+  const bool rawDown = (digitalRead(ENCODER_KEY_PIN) == LOW);
+
+  if (rawDown != encoderBtnRawDown) {
+    encoderBtnRawDown = rawDown;
+    encoderBtnRawChangedMs = now;
+  }
+
+  if ((now - encoderBtnRawChangedMs) >= 35 && rawDown != encoderBtnStableDown) {
+    encoderBtnStableDown = rawDown;
+
+    if (encoderBtnStableDown) {
+      encoderBtnDownMs = now;
+      encoderLongFired = false;
+    } else {
+      if (!encoderLongFired) {
+        encoderClickCount++;
+        encoderLastClickMs = now;
+      }
+    }
+  }
+
+  if (encoderBtnStableDown && !encoderLongFired && (now - encoderBtnDownMs) >= 900) {
+    encoderLongFired = true;
+    encoderClickCount = 0;
+    handleEncoderLongPress();
+  }
+
+  if (!encoderBtnStableDown && encoderClickCount > 0 && (now - encoderLastClickMs) >= 320) {
+    uint8_t clicks = encoderClickCount;
+    encoderClickCount = 0;
+
+    if (clicks >= 2) {
+      handleEncoderDoubleClick();
+    } else {
+      handleEncoderSingleClick();
+    }
+  }
+}
+
+void serviceEncoderControl() {
+  serviceEncoderRotation();
+  serviceEncoderButton();
 }
 
 void serviceAudioCommandQueue() {
@@ -2617,6 +3300,13 @@ String mimeForExt(const String &ext) {
   if (ext == "js") return "application/javascript; charset=utf-8";
   if (ext == "json") return "application/json; charset=utf-8";
   if (ext == "xml") return "application/xml; charset=utf-8";
+  if (ext == "wasm") return "application/wasm";
+  if (ext == "ico") return "image/x-icon";
+  if (ext == "woff") return "font/woff";
+  if (ext == "woff2") return "font/woff2";
+  if (ext == "ttf") return "font/ttf";
+  if (ext == "otf") return "font/otf";
+  if (ext == "map") return "application/json; charset=utf-8";
   if (ext == "txt" || ext == "md" || ext == "ino" || ext == "cpp" || ext == "h" || ext == "hpp" || ext == "c" || ext == "py" || ext == "log" || ext == "cfg" || ext == "ini") return "text/plain; charset=utf-8";
   if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
   if (ext == "png") return "image/png";
@@ -3169,6 +3859,7 @@ void handleAudioPlay() {
   }
 
   playlistActive = false;
+  clearKaraokeState();
   audioStatus = "Soubor: startuji " + path;
 
   if (!queueAudioFilePlay(disk, path)) {
@@ -3257,6 +3948,7 @@ void handleAudioStop() {
   if (!checkWebAuth()) return;
 
   playlistActive = false;
+  clearKaraokeState();
   audioStatus = "Zastavuji...";
   saveRadioResumeState(false, -1, "");
 
@@ -3292,6 +3984,7 @@ void handleAudioStopAjax() {
   if (!checkWebAuth()) return;
 
   playlistActive = false;
+  clearKaraokeState();
   audioStatus = "Zastavuji...";
   saveRadioResumeState(false, -1, "");
 
@@ -3324,7 +4017,7 @@ String audioSidePanelHtml() {
 
   h += "<input type='range' min='0' max='100' value='";
   h += String(cfg.audioVolume);
-  h += "' oninput='setAudioVolume(this.value)'>";
+  h += "' data-audio-volume-range oninput='setAudioVolume(this.value)'>";
 
   h += "<div style='display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px'>";
   h += "<button class='secondary' type='button' onclick=\"return audioAction('/audio/prev')\">⏮ Předchozí</button>";
@@ -3351,9 +4044,11 @@ String audioSidePanelHtml() {
   } else if (audioPlaying) {
     h += "<div class='small good'>Hraje soubor</div>";
   } else if (audioReady) {
-    h += "<div class='small good'>USB audio připraveno</div>";
+    h += "<div class='small good'>Audio výstup: ";
+    h += audioOutputKindName();
+    h += " připraveno</div>";
   } else {
-    h += "<div class='small warn'>USB audio nepřipraveno</div>";
+    h += "<div class='small warn'>Audio výstup nepřipraveno</div>";
   }
 
   h += "</div>";
@@ -3424,6 +4119,11 @@ a:hover{text-decoration:underline}
 .card{padding:12px;margin-bottom:10px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
 .box{background:var(--panel2);padding:10px;border-radius:8px;word-break:break-word;border:1px solid #2d333d}
+.game-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.game-card{background:var(--panel2);border:1px solid #2d333d;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:112px}
+.game-card .title{font-weight:bold;font-size:15px;color:#fff;word-break:break-word}
+.game-card .meta{color:var(--muted);font-size:12px;word-break:break-word}
+.game-card a.play{display:inline-block;text-align:center;background:var(--accent);color:#fff;padding:8px 10px;border-radius:7px;text-decoration:none;font-weight:bold;margin-top:auto}
 input,button,select{box-sizing:border-box;width:100%;padding:9px;margin:4px 0;border-radius:7px;border:1px solid #343b45;background:#252a32;color:#eee}
 button{background:var(--accent);color:white;font-weight:bold;cursor:pointer;border:0}
 button.danger{background:var(--danger)}
@@ -3595,10 +4295,25 @@ function updateAudioUi(text, playing) {
   }
 }
 
+function updateAudioVolumeDisplay(v) {
+  v = parseInt(v, 10);
+  if (isNaN(v)) return;
+  if (v < 0) v = 0;
+  if (v > 100) v = 100;
+
+  document.querySelectorAll('[data-audio-volume-label]').forEach(function(label) {
+    label.textContent = v + ' %';
+  });
+
+  document.querySelectorAll('[data-audio-volume-range]').forEach(function(range) {
+    if (document.activeElement !== range) {
+      range.value = v;
+    }
+  });
+}
+
 function setAudioVolume(v) {
-  document.querySelectorAll('[data-audio-volume-label]').forEach(function(label) { label.textContent = v + ' %'; });
-  var label = document.getElementById('audioVolumeLabel');
-  if (label) label.textContent = v + ' %';
+  updateAudioVolumeDisplay(v);
 
   if (volumeTimer) clearTimeout(volumeTimer);
 
@@ -3606,11 +4321,10 @@ function setAudioVolume(v) {
     fetch('/audio/volume?v=' + encodeURIComponent(v), { credentials: 'same-origin' })
       .then(function(r) { return r.text(); })
       .then(function(t) {
-        document.querySelectorAll('[data-audio-volume-label]').forEach(function(label2) { label2.textContent = t + ' %'; });
-        var label2 = document.getElementById('audioVolumeLabel');
-        if (label2) label2.textContent = t + ' %';
+        volumeTimer = null;
+        updateAudioVolumeDisplay(t);
       })
-      .catch(function() {});
+      .catch(function() { volumeTimer = null; });
   }, 120);
 }
 
@@ -3743,6 +4457,37 @@ function niceBytes(bytes){
   if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
   return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
 }
+
+function setStatusText(id, value, cls){
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = value;
+  if (cls !== undefined) el.className = cls || '';
+}
+
+function refreshBottomStatus(){
+  fetch('/status.json', { credentials: 'same-origin', cache: 'no-store' })
+    .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(st){
+      setStatusText('barHeap', 'Heap: ' + st.heapUsed + ' / ' + st.heapTotal);
+      setStatusText('barPsram', 'PSRAM: ' + st.psramUsed + ' / ' + st.psramTotal, st.psramOk ? 'ok' : 'warn');
+      setStatusText('barUsb', 'USB: ' + st.usb, st.usbOk ? 'ok' : 'warn');
+      setStatusText('barRssi', st.wifiConnected ? ('WiFi: ' + st.rssi + ' dBm') : 'WiFi: AP only', st.wifiConnected ? 'ok' : 'warn');
+      setStatusText('barAudio', 'Audio: ' + st.audio, st.audioPlaying ? 'ok' : 'warn');
+      setStatusText('barUptime', 'Uptime: ' + st.uptime);
+      setStatusText('barAudioDetail', (st.audioPlaying ? '▶ ' : '') + (st.audioDetail || st.audio || ''));
+      updateAudioLabels(st.audioDetail || st.audio || '');
+      if (typeof st.audioVolume !== 'undefined' && !volumeTimer) {
+        updateAudioVolumeDisplay(st.audioVolume);
+      }
+    })
+    .catch(function(){});
+}
+
+document.addEventListener('DOMContentLoaded', function(){
+  refreshBottomStatus();
+  setInterval(refreshBottomStatus, 2000);
+});
 </script>
 
 </head>
@@ -3751,6 +4496,8 @@ function niceBytes(bytes){
 <nav>
 <a href="/files">Soubory</a>
 <a href="/radio">Radio</a>
+<a href="/karaoke">Karaoke</a>
+<a href="/games">Hry</a>
 <a href="/config">Konfigurace</a>
 <a href="/update">Updater</a>
 </nav>
@@ -3764,29 +4511,57 @@ function niceBytes(bytes){
 String compactStatusBarHtml() {
   String s;
   s += "<div class='statusbar'>";
-  s += "<span>AP: " + WiFi.softAPIP().toString() + "</span>";
 
-  if (WiFi.status() == WL_CONNECTED) {
-    s += "<span class='ok'>STA: " + WiFi.localIP().toString() + "</span>";
+  s += "<span id='barHeap'>Heap: " + bytesHuman((uint64_t)ESP.getHeapSize() - ESP.getFreeHeap()) + " / " + bytesHuman(ESP.getHeapSize()) + "</span>";
+
+  bool psOk = psramFound();
+  s += "<span id='barPsram' class='";
+  s += psOk ? "ok" : "warn";
+  s += "'>PSRAM: ";
+  if (psOk) {
+    s += bytesHuman((uint64_t)ESP.getPsramSize() - ESP.getFreePsram()) + " / " + bytesHuman(ESP.getPsramSize());
   } else {
-    s += "<span class='warn'>STA: nepřipojeno</span>";
+    s += "nenalezena";
   }
+  s += "</span>";
 
-  s += "<span>FFat: " + bytesHuman(FFat.usedBytes()) + " / " + bytesHuman(FFat.totalBytes()) + "</span>";
+  bool usbOk = usbDiskMounted();
+  s += "<span id='barUsb' class='";
+  s += usbOk ? "ok" : "warn";
+  s += "'>USB: ";
+  s += usbOk ? "připojeno" : "nepřipojeno";
+  s += "</span>";
 
-  if (usbDiskMounted()) {
-    s += "<span class='ok'>USB: připojeno</span>";
+  bool wifiOk = WiFi.status() == WL_CONNECTED;
+  s += "<span id='barRssi' class='";
+  s += wifiOk ? "ok" : "warn";
+  s += "'>WiFi: ";
+  if (wifiOk) {
+    s += String(WiFi.RSSI()) + " dBm";
   } else {
-    s += "<span class='warn'>USB: nepřipojeno</span>";
+    s += "AP only";
   }
+  s += "</span>";
 
-  if (audioReady) {
-    s += "<span class='ok'>Audio: připraveno</span>";
+  s += "<span id='barAudio' class='";
+  s += audioPlaying ? "ok" : "warn";
+  s += "'>Audio: ";
+  if (radioPlaying) {
+    s += "radio";
+  } else if (playlistActive) {
+    s += "složka";
+  } else if (audioPlaying) {
+    s += "soubor";
+  } else if (audioReady) {
+    s += "připraveno";
   } else {
-    s += "<span class='warn'>Audio: nepřipraveno</span>";
+    s += "nepřipraveno";
   }
+  s += "</span>";
 
-  s += "<span id='audio-status-inline'>";
+  s += "<span id='barUptime'>Uptime: " + uptimeHuman() + "</span>";
+
+  s += "<span id='barAudioDetail'>";
   if (audioPlaying) {
     s += "▶ " + htmlEscape(audioStatus);
   } else {
@@ -3794,13 +4569,6 @@ String compactStatusBarHtml() {
   }
   s += "</span>";
 
-  if (mdnsStarted) {
-    s += "<span>mDNS: " + htmlEscape(mdnsStartedName) + ".local</span>";
-  }
-
-  s += "<span>FTP: ";
-  s += cfg.ftpEnabled ? "zapnuto" : "vypnuto";
-  s += "</span>";
   s += "</div>";
   return s;
 }
@@ -3872,9 +4640,11 @@ String statusCardsHtml() {
   }
   s += "</div>";
 
-s += "<div class='box'><b>USB audio</b><br>";
+s += "<div class='box'><b>Audio výstup</b><br>";
 if (audioReady) {
-  s += "<span class='good'>Připraveno</span><br>";
+  s += "<span class='good'>Připraveno: ";
+  s += audioOutputKindName();
+  s += "</span><br>";
 } else {
   s += "<span class='warn'>Nepřipraveno</span><br>";
 }
@@ -3954,7 +4724,7 @@ void handleConfigPage() {
   html += "<label>Výchozí hlasitost: ";
   html += String(cfg.audioVolume);
   html += " %</label>";
-  html += "<input type='range' min='0' max='100' name='audio_volume' value='" + String(cfg.audioVolume) + "'>";
+  html += "<input type='range' min='0' max='100' name='audio_volume' value='" + String(cfg.audioVolume) + "' data-audio-volume-range>";
 
   html += "<h3>Internetové rádio</h3>";
   html += "<label>Název stanice</label>";
@@ -4910,7 +5680,7 @@ void handleRadioPage() {
   html += "<h3>Přehrávání</h3>";
   html += "<p><b>Stav:</b> <span id='audio-status-inline'>" + htmlEscape(audioStatus) + "</span></p>";
   html += "<label>Hlasitost: <span data-audio-volume-label>" + String(cfg.audioVolume) + " %</span></label>";
-  html += "<input type='range' min='0' max='100' value='" + String(cfg.audioVolume) + "' oninput='setAudioVolume(this.value)'>";
+  html += "<input type='range' min='0' max='100' value='" + String(cfg.audioVolume) + "' data-audio-volume-range oninput='setAudioVolume(this.value)'>";
   html += "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:8px'>";
   html += "<button class='secondary' type='button' onclick=\"return stopAudioAjax()\">Stop</button>";
   html += "<button class='secondary' type='button' onclick=\"return audioAction('/audio/prev')\">⏮ Předchozí</button>";
@@ -4978,6 +5748,645 @@ void handleRadioPlay() {
 }
 
 
+
+
+// ============================================================
+// Karaoke web: levý sloupec souborů + plátno textu
+// ============================================================
+
+bool isKaraokeJsonPath(const String& path) {
+  String lower = path;
+  lower.toLowerCase();
+  return lower.endsWith(".karaoke.json");
+}
+
+String karaokeDisplayNameFromPath(const String& path) {
+  String name = fileNameFromPath(path);
+  if (name.endsWith(".karaoke.json")) {
+    name.remove(name.length() - 14);
+  }
+  return name;
+}
+
+String karaokeFileNameOnly(String path) {
+  path = urlDecode(path);
+  path.replace("\\", "/");
+  path.trim();
+
+  int slash = path.lastIndexOf('/');
+  if (slash >= 0) {
+    path = path.substring(slash + 1);
+  }
+
+  int colon = path.lastIndexOf(':');
+  if (colon >= 0) {
+    path = path.substring(colon + 1);
+  }
+
+  path.trim();
+  return path;
+}
+
+String karaokeJsonBaseName(String jsonPath) {
+  String name = karaokeFileNameOnly(jsonPath);
+  if (name.endsWith(".karaoke.json")) {
+    name.remove(name.length() - 14);
+  } else {
+    int dot = name.lastIndexOf('.');
+    if (dot > 0) name.remove(dot);
+  }
+  return name;
+}
+
+bool tryKaraokeAudioCandidate(const String& disk, String candidate, String& resolved, String& tried) {
+  candidate.trim();
+  if (candidate.length() == 0 || candidate.indexOf("..") >= 0) {
+    return false;
+  }
+
+  if (!safePath(candidate)) {
+    return false;
+  }
+
+  if (tried.length() > 0) tried += ", ";
+  tried += candidate;
+
+  if (fsExistsGeneric(disk, candidate)) {
+    resolved = candidate;
+    return true;
+  }
+
+  return false;
+}
+
+String resolveExistingKaraokeAudioPath(const String& disk, String jsonPath, String audioName, String& tried) {
+  String resolved = "";
+  String dir = parentPath(jsonPath);
+
+  audioName = urlDecode(audioName);
+  audioName.replace("\\", "/");
+  audioName.trim();
+
+  if (audioName.length() > 0 && audioName.indexOf("..") < 0) {
+    if (audioName.startsWith("/")) {
+      if (tryKaraokeAudioCandidate(disk, audioName, resolved, tried)) return resolved;
+    }
+
+    String rel = joinPath(dir, audioName);
+    if (tryKaraokeAudioCandidate(disk, rel, resolved, tried)) return resolved;
+
+    String justName = karaokeFileNameOnly(audioName);
+    if (justName.length() > 0 && justName != audioName) {
+      String sameDir = joinPath(dir, justName);
+      if (tryKaraokeAudioCandidate(disk, sameDir, resolved, tried)) return resolved;
+    }
+  }
+
+  String base = karaokeJsonBaseName(jsonPath);
+  const char* exts[] = { ".mp3", ".MP3", ".wav", ".WAV" };
+  for (uint8_t i = 0; i < 4; i++) {
+    String fallback = joinPath(dir, base + String(exts[i]));
+    if (tryKaraokeAudioCandidate(disk, fallback, resolved, tried)) return resolved;
+  }
+
+  return "";
+}
+
+void appendKaraokeListRecursive(String& json, const String& disk, const String& dirPath, bool& first, uint8_t depth) {
+  if (depth > 10 || !diskAvailable(disk)) {
+    return;
+  }
+
+  File root = fsOpenGeneric(disk, dirPath, FILE_READ);
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    bool isDir = file.isDirectory();
+    String rawName = file.name();
+    file.close();
+
+    String fullPath = fullPathForEntry(dirPath, rawName);
+    if (fullPath.length() > 0) {
+      if (isDir) {
+        appendKaraokeListRecursive(json, disk, fullPath, first, depth + 1);
+      } else if (isKaraokeJsonPath(fullPath)) {
+        if (!first) json += ",";
+        first = false;
+        json += "{";
+        json += "\"disk\":\"" + jsonEscape(disk) + "\",";
+        json += "\"path\":\"" + jsonEscape(fullPath) + "\",";
+        json += "\"name\":\"" + jsonEscape(karaokeDisplayNameFromPath(fullPath)) + "\"";
+        json += "}";
+      }
+    }
+
+    file = root.openNextFile();
+  }
+
+  root.close();
+}
+
+void handleKaraokeListJson() {
+  if (!checkWebAuth()) return;
+
+  String disk = server.hasArg("disk") ? server.arg("disk") : "usb0";
+  String json = "[";
+  bool first = true;
+
+  if (disk == "all") {
+    appendKaraokeListRecursive(json, "usb0", "/", first, 0);
+    appendKaraokeListRecursive(json, "ffat", "/", first, 0);
+  } else if (disk == "usb0" || disk == "ffat") {
+    appendKaraokeListRecursive(json, disk, "/", first, 0);
+  }
+
+  json += "]";
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+void handleKaraokePlay() {
+  if (!checkWebAuth()) return;
+
+  String disk = server.hasArg("disk") ? server.arg("disk") : "usb0";
+  String jsonPath = server.arg("json");
+  String audioArg = server.arg("audio");
+  String title = server.arg("title");
+
+  if ((disk != "usb0" && disk != "ffat") || !safePath(jsonPath) || !isKaraokeJsonPath(jsonPath)) {
+    server.send(400, "text/plain", "Bad karaoke path");
+    return;
+  }
+
+  if (!diskAvailable(disk) || !fsExistsGeneric(disk, jsonPath)) {
+    server.send(404, "text/plain", "Karaoke JSON nenalezen");
+    return;
+  }
+
+  String triedAudioPaths = "";
+  String audioPath = resolveExistingKaraokeAudioPath(disk, jsonPath, audioArg, triedAudioPaths);
+  if (audioPath.length() == 0) {
+    server.send(404, "text/plain; charset=utf-8",
+      "Audio k JSONu nenalezeno. JSON: " + jsonPath +
+      "; audio z JSONu: " + audioArg +
+      "; hledal jsem: " + triedAudioPaths);
+    return;
+  }
+
+  playlistActive = false;
+  karaokeActive = true;
+  karaokeDisk = disk;
+  karaokeJsonPath = jsonPath;
+  karaokeAudioPath = audioPath;
+  karaokeTitle = title.length() ? title : karaokeDisplayNameFromPath(jsonPath);
+  audioStatus = "Karaoke: startuji " + karaokeTitle;
+
+  if (!queueAudioFilePlay(disk, audioPath)) {
+    clearKaraokeState();
+    server.send(503, "text/plain", "Audio fronta je plná");
+    return;
+  }
+
+  server.send(200, "text/plain", audioStatus);
+}
+
+void handleKaraokePage() {
+  if (!checkWebAuth()) return;
+
+  String html = pageHeader("Karaoke");
+  html += R"rawliteral(
+<style>
+.karaoke-layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:10px;height:calc(100vh - 96px);min-height:540px}
+.karaoke-list{background:#181b20;border:1px solid #303640;border-radius:10px;padding:10px;overflow:hidden;display:flex;flex-direction:column}
+.karaoke-results{overflow:auto;display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.karaoke-item{background:#242a33;border:1px solid #323a45;border-radius:8px;padding:8px;text-align:left;color:#fff;cursor:pointer}
+.karaoke-item:hover{background:#2f80ed}.karaoke-item .small{display:block;margin-top:3px;color:#c9d1d9;word-break:break-word}
+.karaoke-stage{background:radial-gradient(circle at center,#172033 0,#090b0f 65%);border:1px solid #303640;border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
+.karaoke-top{display:flex;gap:8px;align-items:center;padding:10px;border-bottom:1px solid #303640;background:rgba(0,0,0,.25)}
+.karaoke-top button{width:auto;margin:0}.karaoke-top .title{font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.karaoke-canvas{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;padding:22px;position:relative}
+.karaoke-lines{width:100%;max-width:1100px}.karaoke-prev,.karaoke-next{font-size:clamp(20px,3vw,38px);color:#8b949e;min-height:1.2em}.karaoke-current{font-size:clamp(34px,6vw,86px);font-weight:800;line-height:1.16;color:white;text-shadow:0 3px 12px #000;margin:20px 0}.karaoke-word{display:inline-block;margin:0 .12em}.karaoke-word.done,.karaoke-word.active{color:#ffd166}.karaoke-word.active{text-decoration:underline}.karaoke-status{padding:8px 10px;border-top:1px solid #303640;color:#9aa3ad;background:rgba(0,0,0,.25)}
+@media(max-width:800px){.karaoke-layout{grid-template-columns:1fr;height:auto}.karaoke-stage{min-height:60vh}}
+</style>
+<h2>Karaoke</h2>
+<div class="karaoke-layout">
+  <section class="karaoke-list">
+    <label>Hledat karaoke</label>
+    <input id="karaokeSearch" placeholder="název / soubor..." oninput="renderKaraokeList()">
+    <label>Disk</label>
+    <select id="karaokeDisk" onchange="loadKaraokeList()"><option value="usb0">USB flashka</option><option value="ffat">Interní FFat</option><option value="all">Vše</option></select>
+    <button type="button" onclick="loadKaraokeList()">Obnovit seznam</button>
+    <div id="karaokeResults" class="karaoke-results"></div>
+  </section>
+  <section class="karaoke-stage" id="karaokeStage">
+    <div class="karaoke-top">
+      <button class="secondary" type="button" onclick="toggleFullscreenKaraoke()">Fullscreen</button>
+      <button class="secondary" type="button" onclick="playRelativeKaraoke(-1)">⏮</button>
+      <button class="secondary" type="button" onclick="playRelativeKaraoke(1)">⏭</button>
+      <button class="secondary" type="button" onclick="return audioAction('/audio/stop')">Stop</button>
+      <div class="title" id="karaokeTitle">Vyber skladbu vlevo</div>
+    </div>
+    <div class="karaoke-canvas">
+      <div class="karaoke-lines">
+        <div id="karaokePrev" class="karaoke-prev"></div>
+        <div id="karaokeCurrent" class="karaoke-current">Karaoke připraveno</div>
+        <div id="karaokeNext" class="karaoke-next"></div>
+      </div>
+    </div>
+    <div id="karaokeStatus" class="karaoke-status">Čekám na výběr skladby.</div>
+  </section>
+</div>
+<script>
+let karaokeItems=[];
+let karaokeDoc=null;
+let karaokeDisk='usb0';
+let karaokeJsonPath='';
+let karaokeLastPosition=-1;
+let karaokeCurrentIndex=-1;
+
+function kEsc(s){return String(s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function kFileName(p){p=String(p||'');let i=p.lastIndexOf('/');return i>=0?p.substring(i+1):p;}
+function kParent(p){p=String(p||'/');let i=p.lastIndexOf('/');return i<=0?'/':p.substring(0,i);}
+function kJoin(dir,name){name=String(name||'').replace(/\\/g,'/');if(name.startsWith('/'))return name; if(dir==='/'||!dir)return '/'+name; return dir+'/'+name;}
+function kPick(o,keys,def){
+  if(!o)return def;
+  for(const k of keys){
+    if(Object.prototype.hasOwnProperty.call(o,k) && o[k]!==undefined && o[k]!==null)return o[k];
+  }
+  return def;
+}
+function normalizeKaraokeDoc(doc){
+  doc=doc||{};
+  const rawLines=kPick(doc,['lines','Lines'],[]);
+  const out={
+    title:String(kPick(doc,['title','Title'],'')||''),
+    artist:String(kPick(doc,['artist','Artist'],'')||''),
+    audio:String(kPick(doc,['audio','Audio'],'')||''),
+    lines:[]
+  };
+  if(Array.isArray(rawLines)){
+    out.lines=rawLines.map(function(l,idx){
+      const rawWords=kPick(l,['words','Words'],[]);
+      return {
+        index:Number(kPick(l,['index','Index'],idx)||idx),
+        text:String(kPick(l,['text','Text'],'')||''),
+        startMs:Number(kPick(l,['startMs','StartMs','StartMS'],0)||0),
+        endMs:Number(kPick(l,['endMs','EndMs','EndMS'],0)||0),
+        words:Array.isArray(rawWords)?rawWords.map(function(w){return {
+          index:Number(kPick(w,['index','Index'],0)||0),
+          text:String(kPick(w,['text','Text'],'')||''),
+          timeMs:Number(kPick(w,['timeMs','TimeMs','TimeMS'],0)||0),
+          endMs:Number(kPick(w,['endMs','EndMs','EndMS'],0)||0)
+        };}):[]
+      };
+    });
+  }
+  return out;
+}
+
+function loadKaraokeList(){
+  const disk=document.getElementById('karaokeDisk').value;
+  fetch('/karaoke/list.json?disk='+encodeURIComponent(disk),{credentials:'same-origin',cache:'no-store'})
+    .then(r=>r.json()).then(j=>{karaokeItems=j||[];renderKaraokeList();})
+    .catch(e=>{document.getElementById('karaokeResults').innerHTML='<div class="warn">Seznam nejde načíst.</div>';});
+}
+
+function renderKaraokeList(){
+  const q=(document.getElementById('karaokeSearch').value||'').toLowerCase();
+  const box=document.getElementById('karaokeResults');
+  let html='';
+  const filtered=karaokeItems.filter(it=>(it.name||it.path||'').toLowerCase().indexOf(q)>=0);
+  if(!filtered.length){box.innerHTML='<div class="small">Nic nenalezeno.</div>';return;}
+  filtered.forEach((it,idx)=>{
+    const real=karaokeItems.indexOf(it);
+    html+='<button type="button" class="karaoke-item" onclick="playKaraoke('+real+')">'+kEsc(it.name||kFileName(it.path))+'<span class="small">'+kEsc(it.disk+': '+it.path)+'</span></button>';
+  });
+  box.innerHTML=html;
+}
+
+function playKaraoke(idx){
+  const item=karaokeItems[idx]; if(!item)return;
+  karaokeCurrentIndex=idx;
+  karaokeDisk=item.disk; karaokeJsonPath=item.path;
+  fetch('/raw?disk='+encodeURIComponent(item.disk)+'&f='+encodeURIComponent(item.path),{credentials:'same-origin',cache:'no-store'})
+    .then(r=>r.json())
+    .then(doc=>{
+      doc=normalizeKaraokeDoc(doc);
+      karaokeDoc=doc;
+      document.getElementById('karaokeTitle').textContent=doc.title||item.name||kFileName(item.path);
+      const audio=kJoin(kParent(item.path),doc.audio||'');
+      const body='disk='+encodeURIComponent(item.disk)+'&json='+encodeURIComponent(item.path)+'&audio='+encodeURIComponent(doc.audio||'')+'&title='+encodeURIComponent(doc.title||item.name||'');
+      return fetch('/karaoke/play',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body}).then(async r=>{
+        const text=await r.text();
+        if(!r.ok) throw new Error(text||('HTTP '+r.status));
+        document.getElementById('karaokeStatus').textContent=text||('Hraju: '+(doc.title||item.name||'')+' / '+audio);
+        renderKaraokeAt(0);
+      });
+    })
+    .catch(e=>{document.getElementById('karaokeStatus').textContent='Karaoke nejde spustit: '+e.message;});
+}
+
+function playRelativeKaraoke(delta){
+  if(!karaokeItems.length)return;
+  let idx=karaokeCurrentIndex;
+  if(idx<0)idx=0; else idx=(idx+delta+karaokeItems.length)%karaokeItems.length;
+  playKaraoke(idx);
+}
+
+function lineIndexForTime(ms){
+  if(!karaokeDoc||!karaokeDoc.lines)return -1;
+  let best=-1;
+  for(let i=0;i<karaokeDoc.lines.length;i++){
+    const l=karaokeDoc.lines[i];
+    if(ms>=Number(l.startMs||0) && ms<=Number(l.endMs||0)) return i;
+    if(ms>=Number(l.startMs||0)) best=i;
+  }
+  return best;
+}
+
+function renderKaraokeAt(ms){
+  if(!karaokeDoc){return;}
+  const lines=karaokeDoc.lines||[];
+  const idx=lineIndexForTime(ms);
+  const prev=idx>0?lines[idx-1]:null;
+  const cur=idx>=0?lines[idx]:null;
+  const next=idx+1<lines.length?lines[idx+1]:null;
+  document.getElementById('karaokePrev').textContent=prev?prev.text:'';
+  document.getElementById('karaokeNext').textContent=next?next.text:'';
+  const box=document.getElementById('karaokeCurrent');
+  if(!cur){box.textContent=karaokeDoc.title||'Karaoke';return;}
+  if(cur.words&&cur.words.length){
+    let html='';
+    cur.words.forEach(w=>{
+      const cls=ms>=Number(w.endMs||0)?'done':(ms>=Number(w.timeMs||0)?'active':'');
+      html+='<span class="karaoke-word '+cls+'">'+kEsc(w.text)+'</span> ';
+    });
+    box.innerHTML=html;
+  }else{
+    box.textContent=cur.text||'';
+  }
+}
+
+function refreshKaraokeState(){
+  fetch('/status.json',{credentials:'same-origin',cache:'no-store'})
+    .then(r=>r.json()).then(st=>{
+      if(typeof st.positionMs==='number'){
+        if(Math.abs(st.positionMs-karaokeLastPosition)>60){
+          karaokeLastPosition=st.positionMs;
+          renderKaraokeAt(st.positionMs);
+        }
+      }
+      if(st.karaokeActive && st.karaokeTitle){document.getElementById('karaokeTitle').textContent=st.karaokeTitle;}
+    }).catch(()=>{});
+}
+
+function toggleFullscreenKaraoke(){
+  const el=document.getElementById('karaokeStage');
+  if(!document.fullscreenElement) el.requestFullscreen && el.requestFullscreen();
+  else document.exitFullscreen && document.exitFullscreen();
+}
+
+document.addEventListener('DOMContentLoaded',function(){loadKaraokeList();setInterval(refreshKaraokeState,200);});
+</script>
+)rawliteral";
+
+  html += pageFooter();
+  server.send(200, "text/html; charset=utf-8", html);
+}
+
+// ============================================================
+// /status.json + /games
+// ============================================================
+
+String audioModeText() {
+  if (karaokeActive) return "karaoke";
+  if (radioPlaying) return "radio";
+  if (playlistActive) return "složka";
+  if (audioPlaying || audioPaused) return "soubor";
+  if (audioReady) return "připraveno";
+  return "nepřipraveno";
+}
+
+void handleStatusJson() {
+  bool psOk = psramFound();
+  bool usbOk = usbDiskMounted();
+  bool wifiOk = WiFi.status() == WL_CONNECTED;
+
+  String json = "{";
+  uint64_t heapTotal = ESP.getHeapSize();
+  uint64_t heapFree = ESP.getFreeHeap();
+  uint64_t heapUsed = heapTotal > heapFree ? (heapTotal - heapFree) : 0;
+
+  uint64_t psramTotal = psOk ? ESP.getPsramSize() : 0;
+  uint64_t psramFree = psOk ? ESP.getFreePsram() : 0;
+  uint64_t psramUsed = psramTotal > psramFree ? (psramTotal - psramFree) : 0;
+
+  json += "\"heapUsed\":\"" + jsonEscape(bytesHuman(heapUsed)) + "\",";
+  json += "\"heapTotal\":\"" + jsonEscape(bytesHuman(heapTotal)) + "\",";
+  json += "\"heapFree\":\"" + jsonEscape(bytesHuman(heapFree)) + "\",";
+  json += "\"heapMaxBlock\":\"" + jsonEscape(bytesHuman(ESP.getMaxAllocHeap())) + "\",";
+  json += "\"psramOk\":" + String(psOk ? "true" : "false") + ",";
+  json += "\"psramUsed\":\"" + jsonEscape(psOk ? bytesHuman(psramUsed) : String("nenalezena")) + "\",";
+  json += "\"psramTotal\":\"" + jsonEscape(psOk ? bytesHuman(psramTotal) : String("0 B")) + "\",";
+  json += "\"psramFree\":\"" + jsonEscape(psOk ? bytesHuman(psramFree) : String("nenalezena")) + "\",";
+  json += "\"psramMaxBlock\":\"" + jsonEscape(psOk ? bytesHuman(ESP.getMaxAllocPsram()) : String("0 B")) + "\",";
+  json += "\"usbOk\":" + String(usbOk ? "true" : "false") + ",";
+  json += "\"usb\":\"" + String(usbOk ? "připojeno" : "nepřipojeno") + "\",";
+  json += "\"wifiConnected\":" + String(wifiOk ? "true" : "false") + ",";
+  json += "\"rssi\":" + String(wifiOk ? WiFi.RSSI() : 0) + ",";
+  json += "\"audioPlaying\":" + String(audioPlaying ? "true" : "false") + ",";
+  json += "\"audioPaused\":" + String(audioPaused ? "true" : "false") + ",";
+  json += "\"positionMs\":" + String(currentAudioPositionMs()) + ",";
+  json += "\"audio\":\"" + jsonEscape(audioModeText()) + "\",";
+  json += "\"audioDetail\":\"" + jsonEscape(audioStatus) + "\",";
+  json += "\"audioOutput\":\"" + jsonEscape(String(audioOutputKindName())) + "\",";
+  json += "\"karaokeActive\":" + String(karaokeActive ? "true" : "false") + ",";
+  json += "\"karaokeJson\":\"" + jsonEscape(karaokeJsonPath) + "\",";
+  json += "\"karaokeAudio\":\"" + jsonEscape(karaokeAudioPath) + "\",";
+  json += "\"karaokeTitle\":\"" + jsonEscape(karaokeTitle) + "\",";
+  json += "\"audioVolume\":" + String(cfg.audioVolume) + ",";
+  json += "\"uptime\":\"" + jsonEscape(uptimeHuman()) + "\"";
+  json += "}";
+
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+bool gameHasIndex(const String& disk, const String& dirPath) {
+  String idx = dirPath;
+  if (!idx.endsWith("/")) idx += "/";
+  idx += "index.html";
+  return diskAvailable(disk) && fsExistsGeneric(disk, idx);
+}
+
+void appendGamesForDisk(String& html, const String& disk) {
+  html += "<div class='card'>";
+  html += "<h3>" + diskTitle(disk) + "</h3>";
+
+  if (!diskAvailable(disk)) {
+    html += "<p class='warn'>Disk není dostupný.</p>";
+    html += "</div>";
+    return;
+  }
+
+  if (!fsExistsGeneric(disk, "/games")) {
+    html += "<p class='small'>Složka <code>/games</code> zatím neexistuje.</p>";
+    html += "<form method='POST' action='/games/mkdir'>";
+    html += "<input type='hidden' name='disk' value='" + disk + "'>";
+    html += "<button type='submit'>Vytvořit /games</button>";
+    html += "</form>";
+    html += "</div>";
+    return;
+  }
+
+  File root = fsOpenGeneric(disk, "/games", FILE_READ);
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    html += "<p class='bad'>/games nejde otevřít jako složka.</p>";
+    html += "</div>";
+    return;
+  }
+
+  html += "<div class='game-grid'>";
+  bool any = false;
+  File file = root.openNextFile();
+  while (file) {
+    String rawName = file.name();
+    String name = displayNameForEntry("/games", rawName);
+    String full = fullPathForEntry("/games", rawName);
+    String lower = name;
+    lower.toLowerCase();
+
+    bool playable = false;
+    String launchPath = full;
+    String typeText;
+
+    if (file.isDirectory()) {
+      if (gameHasIndex(disk, full)) {
+        playable = true;
+        if (!launchPath.endsWith("/")) launchPath += "/";
+        typeText = "HTML5 složka / index.html";
+      }
+    } else if (lower.endsWith(".html") || lower.endsWith(".htm")) {
+      playable = true;
+      typeText = "single-file HTML";
+    }
+
+    if (playable) {
+      any = true;
+      String url = "/game/" + disk + urlEncode(launchPath);
+      html += "<div class='game-card'>";
+      html += "<div class='title'>🎮 " + htmlEscape(name) + "</div>";
+      html += "<div class='meta'>" + htmlEscape(typeText) + "<br>" + htmlEscape(full) + "</div>";
+      html += "<a class='play' href='" + url + "'>Spustit</a>";
+      html += "</div>";
+    }
+
+    file.close();
+    file = root.openNextFile();
+  }
+  root.close();
+
+  if (!any) {
+    html += "<p class='small'>Žádná hra nenalezena. Vlož do <code>/games</code> buď jeden <code>.html</code> soubor, nebo složku s <code>index.html</code>.</p>";
+  }
+
+  html += "</div>";
+  html += "<p class='small'>Správa souborů: <a href='/files?disk=" + disk + "&p=/games'>otevřít /games</a></p>";
+  html += "</div>";
+}
+
+void handleGamesPage() {
+  String html = pageHeader("Hry");
+  html += "<h2>Hry</h2>";
+
+  html += "<div class='card'>";
+  html += "<p>HTML5 hry můžeš dát do interní FFat paměti nebo na USB do složky <code>/games</code>.</p>";
+  html += "<p class='small'>Doporučená struktura: <code>/games/nazev_hry/index.html</code>. Fungují i single-file <code>.html</code> hry. Klasické Java applety/JAR už běžné prohlížeče nepodporují; pro web hry používej JavaScript/HTML5, případně WASM.</p>";
+  html += "</div>";
+
+  appendGamesForDisk(html, "ffat");
+  appendGamesForDisk(html, "usb0");
+
+  html += pageFooter();
+  server.send(200, "text/html", html);
+}
+
+void handleGamesMkdir() {
+  String disk = server.arg("disk");
+  if (disk != "ffat" && disk != "usb0") disk = "ffat";
+
+  if (!diskAvailable(disk)) {
+    server.send(400, "text/plain", "Disk není dostupný");
+    return;
+  }
+
+  if (!fsExistsGeneric(disk, "/games")) {
+    fsMkdirGeneric(disk, "/games");
+  }
+
+  server.sendHeader("Location", "/games");
+  server.send(303);
+}
+
+bool handleGameFsRequest() {
+  String uri = server.uri();
+  String disk;
+  String prefix;
+
+  if (uri.startsWith("/game/ffat")) {
+    disk = "ffat";
+    prefix = "/game/ffat";
+  } else if (uri.startsWith("/game/usb0")) {
+    disk = "usb0";
+    prefix = "/game/usb0";
+  } else {
+    return false;
+  }
+
+  if (!checkWebAuth()) {
+    return true;
+  }
+
+  if (!diskAvailable(disk)) {
+    server.send(404, "text/plain", "Disk není dostupný");
+    return true;
+  }
+
+  String path = uri.substring(prefix.length());
+  if (path.length() == 0) path = "/games/";
+  if (!safePath(path)) {
+    server.send(400, "text/plain", "Neplatná cesta");
+    return true;
+  }
+
+  File file = fsOpenGeneric(disk, path, FILE_READ);
+  if (file && file.isDirectory()) {
+    file.close();
+    if (!uri.endsWith("/")) {
+      server.sendHeader("Location", uri + "/");
+      server.send(303);
+      return true;
+    }
+    if (!path.endsWith("/")) path += "/";
+    path += "index.html";
+    file = fsOpenGeneric(disk, path, FILE_READ);
+  }
+
+  if (!file || file.isDirectory()) {
+    if (file) file.close();
+    server.send(404, "text/plain", "Game file not found");
+    return true;
+  }
+
+  String ext = fileExt(path);
+  server.streamFile(file, mimeForExt(ext));
+  file.close();
+  return true;
+}
+
 // ============================================================
 // Routes
 // ============================================================
@@ -4992,6 +6401,13 @@ void setupRoutes() {
   server.on("/radio", HTTP_GET, handleRadioPage);
   server.on("/radio/save", HTTP_POST, handleRadioSave);
   server.on("/radio/play", HTTP_POST, handleRadioPlay);
+  server.on("/karaoke", HTTP_GET, handleKaraokePage);
+  server.on("/karaoke/list.json", HTTP_GET, handleKaraokeListJson);
+  server.on("/karaoke/play", HTTP_POST, handleKaraokePlay);
+  server.on("/karaoke/play", HTTP_GET, handleKaraokePlay);
+  server.on("/games", HTTP_GET, []() { if (checkWebAuth()) handleGamesPage(); });
+  server.on("/games/mkdir", HTTP_POST, []() { if (checkWebAuth()) handleGamesMkdir(); });
+  server.on("/status.json", HTTP_GET, []() { if (checkWebAuth()) handleStatusJson(); });
   server.on("/config", HTTP_GET, []() { if (checkWebAuth()) handleConfigPage(); });
   server.on("/config/save", HTTP_POST, []() { if (checkWebAuth()) handleConfigSave(); });
   server.on("/reboot", HTTP_POST, []() { if (checkWebAuth()) handleReboot(); });
@@ -5035,6 +6451,7 @@ void setupRoutes() {
   );
 
   server.onNotFound([]() {
+    if (handleGameFsRequest()) return;
     server.send(404, "text/plain", "Not found");
   });
 }
@@ -5085,6 +6502,9 @@ void setup() {
   Serial.println(cfg.apSsid);
   Serial.print("AP IP: ");
   Serial.println(WiFi.softAPIP());
+
+  initI2sAudioOutput();
+  initEncoderControl();
 
   enableUsbPower();
 
@@ -5170,7 +6590,7 @@ void serviceAudioPump() {
     }
   } else {
     // Lokální MP3 se čte průběžně z FFat/USB souboru.
-    // Když je PCM buffer nízko, přidej víc pumpnutí, aby se USB audio nevyhladovělo.
+    // Když je PCM buffer nízko, přidej víc pumpnutí, aby se I2S audio nevyhladovělo.
     size_t af = audio.availableFrames();
 
     uint8_t pumps = 2;
@@ -5217,6 +6637,7 @@ void audioServiceTask(void *param) {
   for (;;) {
     serviceAudioCommandQueue();
     serviceAudioPump();
+    serviceI2sAudioOutput();
     updateMusicRgbLed();
     vTaskDelay(pdMS_TO_TICKS(1));
   }
@@ -5298,6 +6719,7 @@ void loop() {
   serviceMdns();
   serviceRadioResume();
   serviceAudioVolumeSave();
+  serviceEncoderControl();
 
   delay(1);
 }
