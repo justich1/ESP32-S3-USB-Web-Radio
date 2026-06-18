@@ -3274,7 +3274,7 @@ String fileExt(const String &path) {
 
 bool isTextExt(const String &ext) {
   return ext == "txt" || ext == "md" || ext == "ini" || ext == "cfg" ||
-         ext == "log" || ext == "json" || ext == "xml" || ext == "csv" ||
+         ext == "log" || ext == "json" || ext == "ock" || ext == "xml" || ext == "csv" ||
          ext == "html" || ext == "htm" || ext == "css" || ext == "js" ||
          ext == "ino" || ext == "cpp" || ext == "h" || ext == "hpp" ||
          ext == "c" || ext == "py" || ext == "sh" || ext == "bat" ||
@@ -3298,7 +3298,7 @@ String mimeForExt(const String &ext) {
   if (ext == "html" || ext == "htm") return "text/html; charset=utf-8";
   if (ext == "css") return "text/css; charset=utf-8";
   if (ext == "js") return "application/javascript; charset=utf-8";
-  if (ext == "json") return "application/json; charset=utf-8";
+  if (ext == "json" || ext == "ock") return "application/json; charset=utf-8";
   if (ext == "xml") return "application/xml; charset=utf-8";
   if (ext == "wasm") return "application/wasm";
   if (ext == "ico") return "image/x-icon";
@@ -5757,14 +5757,20 @@ void handleRadioPlay() {
 bool isKaraokeJsonPath(const String& path) {
   String lower = path;
   lower.toLowerCase();
-  return lower.endsWith(".karaoke.json");
+  return lower.endsWith(".ock") || lower.endsWith(".karaoke.json");
 }
 
 String karaokeDisplayNameFromPath(const String& path) {
   String name = fileNameFromPath(path);
-  if (name.endsWith(".karaoke.json")) {
-    name.remove(name.length() - 14);
+  String lower = name;
+  lower.toLowerCase();
+
+  if (lower.endsWith(".karaoke.json")) {
+    name.remove(name.length() - 13);
+  } else if (lower.endsWith(".ock")) {
+    name.remove(name.length() - 4);
   }
+
   return name;
 }
 
@@ -5789,12 +5795,18 @@ String karaokeFileNameOnly(String path) {
 
 String karaokeJsonBaseName(String jsonPath) {
   String name = karaokeFileNameOnly(jsonPath);
-  if (name.endsWith(".karaoke.json")) {
-    name.remove(name.length() - 14);
+  String lower = name;
+  lower.toLowerCase();
+
+  if (lower.endsWith(".karaoke.json")) {
+    name.remove(name.length() - 13);
+  } else if (lower.endsWith(".ock")) {
+    name.remove(name.length() - 4);
   } else {
     int dot = name.lastIndexOf('.');
     if (dot > 0) name.remove(dot);
   }
+
   return name;
 }
 
@@ -5968,7 +5980,7 @@ void handleKaraokePage() {
 .karaoke-top{display:flex;gap:8px;align-items:center;padding:10px;border-bottom:1px solid #303640;background:rgba(0,0,0,.25)}
 .karaoke-top button{width:auto;margin:0}.karaoke-top .title{font-weight:bold;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .karaoke-canvas{flex:1;display:flex;align-items:center;justify-content:center;text-align:center;padding:22px;position:relative}
-.karaoke-lines{width:100%;max-width:1100px}.karaoke-prev,.karaoke-next{font-size:clamp(20px,3vw,38px);color:#8b949e;min-height:1.2em}.karaoke-current{font-size:clamp(34px,6vw,86px);font-weight:800;line-height:1.16;color:white;text-shadow:0 3px 12px #000;margin:20px 0}.karaoke-word{display:inline-block;margin:0 .12em}.karaoke-word.done,.karaoke-word.active{color:#ffd166}.karaoke-word.active{text-decoration:underline}.karaoke-status{padding:8px 10px;border-top:1px solid #303640;color:#9aa3ad;background:rgba(0,0,0,.25)}
+.karaoke-lines{width:100%;max-width:1100px}.karaoke-prev,.karaoke-next{font-size:clamp(20px,3vw,38px);color:#8b949e;min-height:1.2em}.karaoke-current{font-size:clamp(34px,6vw,86px);font-weight:800;line-height:1.16;color:white;text-shadow:0 3px 12px #000;margin:20px 0}.karaoke-word{display:inline-block;margin:0;white-space:pre}.karaoke-word.done,.karaoke-word.active{color:#ffd166}.karaoke-word.active{text-decoration:underline}.karaoke-status{padding:8px 10px;border-top:1px solid #303640;color:#9aa3ad;background:rgba(0,0,0,.25)}
 @media(max-width:800px){.karaoke-layout{grid-template-columns:1fr;height:auto}.karaoke-stage{min-height:60vh}}
 </style>
 <h2>Karaoke</h2>
@@ -6018,6 +6030,37 @@ function kPick(o,keys,def){
   }
   return def;
 }
+function kCleanKaraokeText(s){
+  // Lomítko v exportech z KFN bereme jako oddělovač slabik, ne jako znak k zobrazení.
+  return String(s||'').replace(/\s*\/\s*/g,'');
+}
+function kMatchText(s){
+  return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');
+}
+function kBuildTimedSyllableText(lineText,words){
+  if(!Array.isArray(words)||!words.length)return [];
+  if(!lineText)return words;
+  const lineKey=kMatchText(lineText);
+  const wordsKey=kMatchText(words.map(w=>w.text||'').join(''));
+  if(!lineKey||!wordsKey||lineKey!==wordsKey)return words;
+
+  let pos=0;
+  const out=words.map(w=>Object.assign({},w));
+  for(let i=0;i<out.length;i++){
+    const target=kMatchText(out[i].text||'');
+    if(!target)continue;
+    let got='';
+    let display='';
+    while(pos<lineText.length&&got.length<target.length){
+      const ch=lineText[pos++];
+      display+=ch;
+      got+=kMatchText(ch);
+    }
+    out[i].text=display||out[i].text||'';
+  }
+  if(pos<lineText.length&&out.length)out[out.length-1].text+=lineText.substring(pos);
+  return out;
+}
 function normalizeKaraokeDoc(doc){
   doc=doc||{};
   const rawLines=kPick(doc,['lines','Lines'],[]);
@@ -6030,17 +6073,19 @@ function normalizeKaraokeDoc(doc){
   if(Array.isArray(rawLines)){
     out.lines=rawLines.map(function(l,idx){
       const rawWords=kPick(l,['words','Words'],[]);
+      const lineText=kCleanKaraokeText(String(kPick(l,['text','Text'],'')||''));
+      const words=Array.isArray(rawWords)?rawWords.map(function(w){return {
+        index:Number(kPick(w,['index','Index'],0)||0),
+        text:kCleanKaraokeText(String(kPick(w,['text','Text'],'')||'')),
+        timeMs:Number(kPick(w,['timeMs','TimeMs','TimeMS'],0)||0),
+        endMs:Number(kPick(w,['endMs','EndMs','EndMS'],0)||0)
+      };}):[];
       return {
         index:Number(kPick(l,['index','Index'],idx)||idx),
-        text:String(kPick(l,['text','Text'],'')||''),
+        text:lineText,
         startMs:Number(kPick(l,['startMs','StartMs','StartMS'],0)||0),
         endMs:Number(kPick(l,['endMs','EndMs','EndMS'],0)||0),
-        words:Array.isArray(rawWords)?rawWords.map(function(w){return {
-          index:Number(kPick(w,['index','Index'],0)||0),
-          text:String(kPick(w,['text','Text'],'')||''),
-          timeMs:Number(kPick(w,['timeMs','TimeMs','TimeMS'],0)||0),
-          endMs:Number(kPick(w,['endMs','EndMs','EndMS'],0)||0)
-        };}):[]
+        words:kBuildTimedSyllableText(lineText,words)
       };
     });
   }
@@ -6122,7 +6167,7 @@ function renderKaraokeAt(ms){
     let html='';
     cur.words.forEach(w=>{
       const cls=ms>=Number(w.endMs||0)?'done':(ms>=Number(w.timeMs||0)?'active':'');
-      html+='<span class="karaoke-word '+cls+'">'+kEsc(w.text)+'</span> ';
+      html+='<span class="karaoke-word '+cls+'">'+kEsc(w.text)+'</span>';
     });
     box.innerHTML=html;
   }else{
