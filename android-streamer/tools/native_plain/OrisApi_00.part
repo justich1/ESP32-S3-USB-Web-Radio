@@ -1,0 +1,169 @@
+package cz.oris.mobileaudio;
+
+import android.content.ContentResolver;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Base64;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.UUID;
+
+public final class OrisApi {
+    public interface JsonCallback { void done(JSONObject data, Exception error); }
+    public interface ArrayCallback { void done(JSONArray data, Exception error); }
+    public interface TextCallback { void done(String text, Exception error); }
+    public interface BitmapCallback { void done(Bitmap bitmap, Exception error); }
+
+    private final Context context;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private volatile String host;
+    private volatile String user;
+    private volatile String password;
+
+    public OrisApi(Context context, String host, String user, String password) {
+        this.context = context.getApplicationContext();
+        configure(host, user, password);
+    }
+
+    public void configure(String host, String user, String password) {
+        String value = host == null ? "" : host.trim();
+        value = value.replace("http://", "").replace("https://", "");
+        int slash = value.indexOf('/');
+        if (slash >= 0) value = value.substring(0, slash);
+        int colon = value.lastIndexOf(':');
+        if (colon > 0 && value.indexOf(':') == colon) value = value.substring(0, colon);
+        this.host = value.isEmpty() ? "192.168.1.177" : value;
+        this.user = user == null || user.trim().isEmpty() ? "admin" : user.trim();
+        this.password = password == null ? "" : password;
+    }
+
+    public String getHost() { return host; }
+    public String absolute(String path) {
+        if (path == null || path.isEmpty()) return "http://" + host + "/";
+        if (path.startsWith("http://") || path.startsWith("https://")) return path;
+        return "http://" + host + (path.startsWith("/") ? path : "/" + path);
+    }
+
+    public void getJson(String path, JsonCallback callback) {
+        request("GET", path, null, "application/x-www-form-urlencoded", (text, error) -> {
+            if (error != null) callback.done(null, error);
+            else {
+                try { callback.done(new JSONObject(text), null); }
+                catch (Exception e) { callback.done(null, e); }
+            }
+        });
+    }
+
+    public void getArray(String path, ArrayCallback callback) {
+        request("GET", path, null, "application/x-www-form-urlencoded", (text, error) -> {
+            if (error != null) callback.done(null, error);
+            else {
+                try { callback.done(new JSONArray(text), null); }
+                catch (Exception e) { callback.done(null, e); }
+            }
+        });
+    }
+
+    public void getText(String path, TextCallback callback) {
+        request("GET", path, null, "application/x-www-form-urlencoded", callback);
+    }
+
+    public void post(String path, TextCallback callback) {
+        request("POST", path, new byte[0], "application/x-www-form-urlencoded", callback);
+    }
+
+    public void postForm(String path, Map<String, String> values, TextCallback callback) {
+        StringBuilder body = new StringBuilder();
+        try {
+            for (Map.Entry<String, String> entry : values.entrySet()) {
+                if (body.length() > 0) body.append('&');
+                body.append(URLEncoder.encode(entry.getKey(), "UTF-8"));
+                body.append('=');
+                body.append(URLEncoder.encode(entry.getValue() == null ? "" : entry.getValue(), "UTF-8"));
+            }
+        } catch (Exception e) {
+            callback.done(null, e);
+            return;
+        }
+        request("POST", path, body.toString().getBytes(StandardCharsets.UTF_8),
+                "application/x-www-form-urlencoded", callback);
+    }
+
+    public void deleteByGet(String path, TextCallback callback) { getText(path, callback); }
+
+    private void request(String method, String path, byte[] body, String contentType, TextCallback callback) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = open(path, method);
+                connection.setRequestProperty("Accept", "application/json, text/plain, */*");
+                if (body != null) {
+                    connection.setDoOutput(true);
+                    connection.setRequestProperty("Content-Type", contentType);
+                    connection.setFixedLengthStreamingMode(body.length);
+                    try (OutputStream out = connection.getOutputStream()) { out.write(body); }
+                }
+                int code = connection.getResponseCode();
+                InputStream input = code >= 200 && code < 400
+                        ? connection.getInputStream() : connection.getErrorStream();
+                String text = readText(input);
+                if (code < 200 || code >= 400) throw new RuntimeException(
+                        (text == null || text.trim().isEmpty()) ? "HTTP " + code : text.trim());
+                String result = text == null ? "" : text;
+                main.post(() -> callback.done(result, null));
+            } catch (Exception e) {
+                main.post(() -> callback.done(null, e));
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "OrisApi").start();
+    }
+
+    public void loadBitmap(String path, BitmapCallback callback) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = open(path, "GET");
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 400) throw new RuntimeException("HTTP " + code);
+                Bitmap bitmap = BitmapFactory.decodeStream(connection.getInputStream());
+                if (bitmap == null) throw new RuntimeException("Obrázek nelze načíst");
+                Bitmap finalBitmap = bitmap;
+                main.post(() -> callback.done(finalBitmap, null));
+            } catch (Exception e) {
+                main.post(() -> callback.done(null, e));
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "OrisImage").start();
+    }
+
+    public void upload(Uri uri, String fieldName, String path, TextCallback callback) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                String boundary = "----ORIS" + UUID.randomUUID().toString().replace("-", "");
+                connection = open(path, "POST");
+                connection.setDoOutput(true);
+                connection.setChunkedStreamingMode(16 * 1024);
+                connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+                ContentResolver resolver = context.getContentResolver();
+                String fileName = "upload.bin";
+                String type = resolver.getType(uri);
+                if (type == null) type = "application/octet-stream";
