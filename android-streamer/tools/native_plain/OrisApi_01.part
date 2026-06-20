@@ -1,0 +1,57 @@
+                String last = uri.getLastPathSegment();
+                if (last != null && !last.trim().isEmpty()) fileName = last.replace('"', '_');
+
+                try (OutputStream out = connection.getOutputStream();
+                     InputStream in = resolver.openInputStream(uri)) {
+                    if (in == null) throw new RuntimeException("Soubor nelze otevřít");
+                    String head = "--" + boundary + "\r\n"
+                            + "Content-Disposition: form-data; name=\"" + fieldName + "\"; filename=\"" + fileName + "\"\r\n"
+                            + "Content-Type: " + type + "\r\n\r\n";
+                    out.write(head.getBytes(StandardCharsets.UTF_8));
+                    byte[] buffer = new byte[16 * 1024];
+                    int read;
+                    while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+                    out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+                }
+
+                int code = connection.getResponseCode();
+                InputStream input = code >= 200 && code < 400
+                        ? connection.getInputStream() : connection.getErrorStream();
+                String text = readText(input);
+                if (code < 200 || code >= 400) throw new RuntimeException(
+                        (text == null || text.trim().isEmpty()) ? "HTTP " + code : text.trim());
+                String result = text == null ? "Hotovo" : text;
+                main.post(() -> callback.done(result, null));
+            } catch (Exception e) {
+                main.post(() -> callback.done(null, e));
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "OrisUpload").start();
+    }
+
+    private HttpURLConnection open(String path, String method) throws Exception {
+        URL url = new URL(absolute(path));
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(5000);
+        connection.setReadTimeout(10000);
+        connection.setUseCaches(false);
+        connection.setRequestMethod(method);
+        String auth = user + ":" + password;
+        connection.setRequestProperty("Authorization", "Basic " + Base64.encodeToString(
+                auth.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
+        return connection;
+    }
+
+    private static String readText(InputStream input) throws Exception {
+        if (input == null) return "";
+        try (InputStream in = input; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) >= 0) out.write(buffer, 0, read);
+            return out.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    public static Map<String, String> form() { return new LinkedHashMap<>(); }
+}
