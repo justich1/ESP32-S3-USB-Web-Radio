@@ -43,12 +43,14 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import base64
 
           root = Path('android-streamer/tools')
-          patch_parts = sorted((root / 'v033_patch_parts').glob('*.b64'))
-          patch = ''.join(part.read_text(encoding='utf-8').strip() for part in patch_parts)
-          tail_codes = [74, 80, 52, 55, 74, 68, 104, 98, 66, 100, 70, 78, 120, 67, 66, 65, 47, 68, 99, 110, 76, 98, 97, 51, 65, 112, 112, 109, 51, 74, 65, 107, 67, 108, 73, 66, 68, 105, 80, 47, 65, 47, 50, 57, 70, 106, 98, 105, 74, 119, 65, 65]
-          patch += ''.join(chr(code) for code in tail_codes)
+          encoded_parts = sorted((root / 'v033_patch_encoded').glob('*.b64x'))
+          patch = ''.join(
+              base64.b64decode(part.read_text(encoding='utf-8').strip()).decode('ascii')
+              for part in encoded_parts
+          )
           (root / 'v033' / 'apply_v033.py.gz.b64').write_text(patch, encoding='utf-8')
 
           service_parts = [
