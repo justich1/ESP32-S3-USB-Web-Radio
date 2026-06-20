@@ -1,0 +1,128 @@
+from pathlib import Path
+import hashlib
+
+root = Path(__file__).resolve().parents[1]
+main_path = root / 'app/src/main/java/cz/oris/mobileaudio/MainActivity.java'
+api_path = root / 'app/src/main/java/cz/oris/mobileaudio/OrisApi.java'
+main = main_path.read_text(encoding='utf-8')
+api = api_path.read_text(encoding='utf-8')
+assert hashlib.sha256(main.encode()).hexdigest() == '35e6af1404d20dd33f089ab893fb2b8357fba203ec42625f504797d4fd88cc60'
+assert hashlib.sha256(api.encode()).hexdigest() == '9b25ab23bf49b3f785b09bd04e3f24183c1d52e0a5952aa5e2671db88eea5292'
+
+# --- MainActivity: constants and fields ---
+main = main.replace(
+    '    private static final int REQUEST_RECORD_AUDIO = 2004;\n',
+    '    private static final int REQUEST_RECORD_AUDIO = 2004;\n'
+    '    private static final int PICK_FILE_UPLOAD = 2005;\n'
+    '    private static final int CREATE_FILE_DOWNLOAD = 2006;\n',
+    1,
+)
+main = main.replace(
+    '    private GridLayout playerStationGrid;\n',
+    '    private GridLayout playerStationGrid;\n'
+    '    private String lastStationGridSignature = "";\n',
+    1,
+)
+main = main.replace(
+    '    private TextView filesPathLabel;\n',
+    '    private TextView filesPathLabel;\n'
+    '    private final ArrayList<Uri> pendingUploadUris = new ArrayList<>();\n'
+    '    private int pendingUploadIndex = 0;\n'
+    '    private String pendingDownloadDisk = "";\n'
+    '    private String pendingDownloadPath = "";\n'
+    '    private String pendingDownloadName = "";\n',
+    1,
+)
+
+# File toolbar: add upload button row
+needle = '''        toolbar.addView(pathActions, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(toolbar, matchWrapWithMargins(0, 0, 0, 10));
+'''
+replacement = '''        toolbar.addView(pathActions, matchWrapWithMargins(0, 8, 0, 0));
+
+        Button uploadFiles = textButton("⬆ Nahrát soubory", ACCENT);
+        uploadFiles.setOnClickListener(v -> chooseFilesForUpload());
+        toolbar.addView(uploadFiles, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(toolbar, matchWrapWithMargins(0, 0, 0, 10));
+'''
+assert needle in main
+main = main.replace(needle, replacement, 1)
+
+# Let the action button open the menu for files and folders; tapping the row still opens the folder.
+main = main.replace(
+    '        Button action = textButton(dir ? "Otevřít" : "Akce", dir ? ACCENT : PANEL_3);\n'
+    '        action.setOnClickListener(v -> {\n'
+    '            if (dir) {\n'
+    '                filesPath = path;\n'
+    '                loadFiles();\n'
+    '            } else {\n'
+    '                showFileActions(action, item);\n'
+    '            }\n'
+    '        });',
+    '        Button action = textButton("Akce", PANEL_3);\n'
+    '        action.setOnClickListener(v -> showFileActions(action, item));',
+    1,
+)
+
+# Replace showFileActions with richer menu. Locate exact method boundaries.
+start = main.index('    private void showFileActions(View anchor, JSONObject item) {')
+end = main.index('    private void openFilePreview(JSONObject item) {', start)
+new_actions = '''    private void showFileActions(View anchor, JSONObject item) {
+        boolean dir = item.optBoolean("dir", false);
+        String ext = item.optString("ext", "").toLowerCase(Locale.ROOT);
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 1, dir ? "Otevřít složku" : "Otevřít / náhled");
+        if (!dir && isAudioFileExt(ext)) menu.getMenu().add(0, 2, 2, "Přehrát v rádiu");
+        if (!dir && isTextFileExt(ext)) menu.getMenu().add(0, 3, 3, "Editovat");
+        if (!dir) menu.getMenu().add(0, 4, 4, "Stáhnout do telefonu");
+        menu.getMenu().add(0, 5, 5, "Přejmenovat");
+        menu.getMenu().add(0, 6, 6, dir ? "Smazat složku" : "Smazat soubor");
+        menu.setOnMenuItemClickListener(menuItem -> {
+            switch (menuItem.getItemId()) {
+                case 1:
+                    if (dir) {
+                        filesPath = item.optString("path", "/");
+                        loadFiles();
+                    } else {
+                        openFilePreview(item);
+                    }
+                    return true;
+                case 2:
+                    playFileOnRadio(item.optString("path", ""));
+                    return true;
+                case 3:
+                    editTextFile(item.optString("name", "Soubor"), item.optString("path", ""));
+                    return true;
+                case 4:
+                    beginFileDownload(item);
+                    return true;
+                case 5:
+                    renameFileOrFolder(item);
+                    return true;
+                case 6:
+                    confirmDeleteFileOrFolder(item);
+                    return true;
+                default:
+                    return false;
+            }
+        });
+        menu.show();
+    }
+
+'''
+main = main[:start] + new_actions + main[end:]
+
+# Insert upload/download/rename/delete methods before buildKaraokePage.
+insert_at = main.index('    private View buildKaraokePage()')
+file_ops = '''    private void chooseFilesForUpload() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(intent, PICK_FILE_UPLOAD);
+    }
+
+    private void queueSelectedUploads(Intent data) {
+        pendingUploadUris.clear();
+        pendingUploadIndex = 0;
+        ClipData clip = data.getClipData();
