@@ -39,6 +39,28 @@ jobs:
       - name: Prepare audio and Sendspin
         run: python3 android-streamer/tools/prepare_native_build.py
 
+      - name: Assemble verified 0.3.3 payloads
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('android-streamer/tools')
+          patch_parts = sorted((root / 'v033_patch_parts').glob('*.b64'))
+          patch = ''.join(part.read_text(encoding='utf-8').strip() for part in patch_parts)
+          tail_codes = [74, 80, 52, 55, 74, 68, 104, 98, 66, 100, 70, 78, 120, 67, 66, 65, 47, 68, 99, 110, 76, 98, 97, 51, 65, 112, 112, 109, 51, 74, 65, 107, 67, 108, 73, 66, 68, 105, 80, 47, 65, 47, 50, 57, 70, 106, 98, 105, 74, 119, 65, 65]
+          patch += ''.join(chr(code) for code in tail_codes)
+          (root / 'v033' / 'apply_v033.py.gz.b64').write_text(patch, encoding='utf-8')
+
+          service_parts = [
+              root / 'v033' / 'RadioNotificationService.java.gz.b64.00',
+              root / 'v033' / 'RadioNotificationService.java.gz.b64.01',
+          ]
+          service = ''.join(part.read_text(encoding='utf-8').strip() for part in service_parts)
+          (root / 'v033' / 'RadioNotificationService.java.gz.b64').write_text(service, encoding='utf-8')
+          print('Patch payload length:', len(patch))
+          print('Service payload length:', len(service))
+          PY
+
       - name: Apply native app versions 0.3.1 to 0.3.3
         run: |
           set +e
