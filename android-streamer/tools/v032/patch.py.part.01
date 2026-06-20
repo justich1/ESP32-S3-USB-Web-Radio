@@ -1,0 +1,118 @@
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri uri = clip.getItemAt(i).getUri();
+                if (uri != null) pendingUploadUris.add(uri);
+            }
+        } else if (data.getData() != null) {
+            pendingUploadUris.add(data.getData());
+        }
+        if (pendingUploadUris.isEmpty()) {
+            setBottomStatus("Nebyl vybrán žádný soubor", WARN);
+            return;
+        }
+        uploadNextFile();
+    }
+
+    private void uploadNextFile() {
+        if (pendingUploadIndex >= pendingUploadUris.size()) {
+            int count = pendingUploadUris.size();
+            pendingUploadUris.clear();
+            pendingUploadIndex = 0;
+            setBottomStatus("Nahráno souborů: " + count, OK);
+            loadFiles();
+            return;
+        }
+        Uri uri = pendingUploadUris.get(pendingUploadIndex);
+        String name = displayName(uri);
+        setBottomStatus("Nahrávám " + (pendingUploadIndex + 1) + "/" + pendingUploadUris.size() + ": " + name, MUTED);
+        String target = "/upload?disk=" + enc(filesDisk) + "&p=" + enc(filesPath);
+        api.upload(uri, "file", target, (result, error) -> {
+            if (error != null) {
+                setBottomStatus("Nahrání selhalo: " + name + " · " + error.getMessage(), DANGER);
+                pendingUploadUris.clear();
+                pendingUploadIndex = 0;
+                return;
+            }
+            pendingUploadIndex++;
+            uploadNextFile();
+        });
+    }
+
+    private void beginFileDownload(JSONObject item) {
+        pendingDownloadDisk = filesDisk;
+        pendingDownloadPath = item.optString("path", "");
+        pendingDownloadName = item.optString("name", fileName(pendingDownloadPath));
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        intent.putExtra(Intent.EXTRA_TITLE, pendingDownloadName);
+        startActivityForResult(intent, CREATE_FILE_DOWNLOAD);
+    }
+
+    private void finishFileDownload(Uri target) {
+        if (target == null || pendingDownloadPath.isEmpty()) return;
+        String source = "/download?disk=" + enc(pendingDownloadDisk) + "&f=" + enc(pendingDownloadPath);
+        String name = pendingDownloadName;
+        setBottomStatus("Stahuji " + name + "…", MUTED);
+        api.download(source, target, (result, error) -> {
+            if (error != null) setBottomStatus("Stažení selhalo: " + error.getMessage(), DANGER);
+            else setBottomStatus("Staženo: " + name, OK);
+            pendingDownloadDisk = "";
+            pendingDownloadPath = "";
+            pendingDownloadName = "";
+        });
+    }
+
+    private void renameFileOrFolder(JSONObject item) {
+        String oldPath = item.optString("path", "");
+        String oldName = item.optString("name", fileName(oldPath));
+        EditText nameInput = input("Nový název", oldName, false);
+        nameInput.setSelectAllOnFocus(true);
+        LinearLayout box = new LinearLayout(this);
+        box.setPadding(dp(18), dp(4), dp(18), 0);
+        box.addView(nameInput, matchWrap());
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Přejmenovat")
+                .setView(box)
+                .setNegativeButton("Zrušit", null)
+                .setPositiveButton("Přejmenovat", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String newName = nameInput.getText().toString().trim();
+            if (newName.isEmpty() || newName.contains("/") || newName.contains("\\\\") || newName.contains("..")) {
+                nameInput.setError("Neplatný název");
+                return;
+            }
+            Map<String, String> values = new LinkedHashMap<>();
+            values.put("disk", filesDisk);
+            values.put("p", filesPath);
+            values.put("f", oldPath);
+            values.put("name", newName);
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            setBottomStatus("Přejmenovávám " + oldName + "…", MUTED);
+            api.postForm("/rename", values, (result, error) -> {
+                if (error != null) {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                    setBottomStatus("Přejmenování selhalo: " + error.getMessage(), DANGER);
+                } else {
+                    dialog.dismiss();
+                    setBottomStatus("Přejmenováno na " + newName, OK);
+                    loadFiles();
+                }
+            });
+        }));
+        dialog.show();
+    }
+
+    private void confirmDeleteFileOrFolder(JSONObject item) {
+        boolean dir = item.optBoolean("dir", false);
+        String name = item.optString("name", "Položka");
+        String path = item.optString("path", "");
+        new AlertDialog.Builder(this)
+                .setTitle(dir ? "Smazat složku" : "Smazat soubor")
+                .setMessage("Opravdu smazat " + name + (dir ? " včetně jejího obsahu?" : "?"))
+                .setNegativeButton("Ne", null)
+                .setPositiveButton("Smazat", (dialog, which) -> {
+                    setBottomStatus("Mažu " + name + "…", MUTED);
+                    String request = "/delete?disk=" + enc(filesDisk) + "&p=" + enc(filesPath) + "&f=" + enc(path);
+                    api.getText(request, (result, 
