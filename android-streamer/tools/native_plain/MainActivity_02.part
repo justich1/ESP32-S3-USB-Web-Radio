@@ -1,0 +1,165 @@
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return root;
+    }
+
+    private void showMenu(View anchor) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        int id = 1;
+        for (Page page : Page.values()) popup.getMenu().add(0, id++, id, page.title);
+        popup.setOnMenuItemClickListener(item -> {
+            int index = item.getItemId() - 1;
+            if (index >= 0 && index < Page.values().length) showPage(Page.values()[index]);
+            return true;
+        });
+        popup.show();
+    }
+
+    private void showPage(Page page) {
+        currentPage = page;
+        pageTitle.setText(page.title);
+        pageHost.removeAllViews();
+        View view;
+        switch (page) {
+            case RADIO: view = buildRadioPage(); break;
+            case PHONE_MUSIC: view = buildPhoneMusicPage(); break;
+            case SYSTEM_AUDIO: view = buildSystemAudioPage(); break;
+            case FILES: view = buildFilesPage(); break;
+            case KARAOKE: view = buildKaraokePage(); break;
+            case SETTINGS: view = buildSettingsPage(); break;
+            case PLAYER:
+            default: view = buildPlayerPage(); break;
+        }
+        pageHost.addView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private View buildPlayerPage() {
+        LinearLayout body = verticalBody();
+
+        LinearLayout playerCard = card();
+        playerCard.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        playerMode = pill("PŘIPRAVENO", ACCENT);
+        playerCard.addView(playerMode, wrapCenter());
+
+        playerCover = new ImageView(this);
+        playerCover.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        playerCover.setImageResource(android.R.drawable.ic_media_play);
+        playerCover.setBackground(round(PANEL_3, dp(18), LINE, dp(1)));
+        playerCover.setPadding(dp(20), dp(20), dp(20), dp(20));
+        LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(dp(210), dp(210));
+        coverParams.gravity = Gravity.CENTER_HORIZONTAL;
+        coverParams.setMargins(0, dp(12), 0, dp(14));
+        playerCard.addView(playerCover, coverParams);
+
+        TextView eyebrow = text("ORIS RADIO", 12, ACCENT_2, true);
+        eyebrow.setGravity(Gravity.CENTER_HORIZONTAL);
+        playerCard.addView(eyebrow, matchWrap());
+
+        playerMainTitle = text("Přehrávač připraven", 25, TEXT, true);
+        playerMainTitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        playerMainTitle.setPadding(dp(4), dp(4), dp(4), 0);
+        playerCard.addView(playerMainTitle, matchWrap());
+
+        playerSubtitle = text("Vyber stanici a spusť přehrávání.", 14, MUTED, false);
+        playerSubtitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        playerSubtitle.setPadding(dp(4), dp(4), dp(4), 0);
+        playerCard.addView(playerSubtitle, matchWrap());
+
+        playerDetail = text("Načítám stav…", 13, TEXT, false);
+        playerDetail.setGravity(Gravity.CENTER_HORIZONTAL);
+        playerDetail.setPadding(dp(10), dp(10), dp(10), dp(10));
+        playerDetail.setBackground(round(PANEL_2, dp(11), LINE, dp(1)));
+        LinearLayout.LayoutParams detailParams = matchWrap();
+        detailParams.setMargins(0, dp(12), 0, dp(8));
+        playerCard.addView(playerDetail, detailParams);
+
+        playerBattery = text("Baterie: --", 12, MUTED, false);
+        playerBattery.setGravity(Gravity.CENTER_HORIZONTAL);
+        playerCard.addView(playerBattery, matchWrap());
+
+        LinearLayout controls = horizontalRow();
+        Button previous = circleButton("⏮", PANEL_3, 58);
+        previous.setOnClickListener(v -> playRelativeStation(-1));
+        controls.addView(previous);
+
+        playerPlayPause = circleButton("▶", ACCENT, 72);
+        playerPlayPause.setTextSize(25);
+        playerPlayPause.setOnClickListener(v -> togglePlayer());
+        LinearLayout.LayoutParams big = new LinearLayout.LayoutParams(dp(72), dp(72));
+        big.setMargins(dp(12), 0, dp(12), 0);
+        controls.addView(playerPlayPause, big);
+
+        Button next = circleButton("⏭", PANEL_3, 58);
+        next.setOnClickListener(v -> playRelativeStation(1));
+        controls.addView(next);
+
+        Button stop = circleButton("■", DANGER, 58);
+        LinearLayout.LayoutParams stopParams = new LinearLayout.LayoutParams(dp(58), dp(58));
+        stopParams.setMargins(dp(12), 0, 0, 0);
+        controls.addView(stop, stopParams);
+        stop.setOnClickListener(v -> audioPost("/audio/stop_ajax"));
+
+        LinearLayout.LayoutParams controlsParams = wrapCenter();
+        controlsParams.setMargins(0, dp(14), 0, dp(10));
+        playerCard.addView(controls, controlsParams);
+
+        TextView volLabel = text("HLASITOST", 12, MUTED, true);
+        playerCard.addView(volLabel, matchWrap());
+        playerVolume = new SeekBar(this);
+        playerVolume.setMax(100);
+        playerVolume.setProgress(lastConfig == null ? 50 : lastConfig.optInt("audioVolume", 50));
+        playerVolume.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {}
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) { setRadioVolume(seekBar.getProgress()); }
+        });
+        playerCard.addView(playerVolume, matchWrap());
+
+        body.addView(playerCard, matchWrapWithMargins(0, 0, 0, 14));
+
+        LinearLayout stationCard = card();
+        TextView stationsTitle = text("Stanice", 20, TEXT, true);
+        stationCard.addView(stationsTitle, matchWrap());
+        TextView stationsNote = text("Jedním klepnutím přepneš rádio.", 13, MUTED, false);
+        stationCard.addView(stationsNote, matchWrap());
+
+        playerStationGrid = new GridLayout(this);
+        playerStationGrid.setColumnCount(2);
+        playerStationGrid.setUseDefaultMargins(true);
+        stationCard.addView(playerStationGrid, matchWrap());
+        body.addView(stationCard, matchWrap());
+
+        refreshStatus(true);
+        refreshConfig(true);
+        return scroll(body);
+    }
+
+    private View buildRadioPage() {
+        LinearLayout body = verticalBody();
+        TextView intro = text("Stanice, MP3 streamy a loga. Vše je uložené přímo v rádiu.", 14, MUTED, false);
+        body.addView(intro, matchWrapWithMargins(0, 0, 0, 10));
+
+        LinearLayout actions = horizontalRow();
+        Button refresh = textButton("Obnovit", PANEL_3);
+        refresh.setOnClickListener(v -> loadRadioEditor());
+        actions.addView(refresh, weighted());
+        Button save = textButton("Uložit stanice", ACCENT);
+        save.setOnClickListener(v -> saveRadioStations());
+        actions.addView(save, weighted());
+        body.addView(actions, matchWrapWithMargins(0, 0, 0, 10));
+
+        radioEditorList = new LinearLayout(this);
+        radioEditorList.setOrientation(LinearLayout.VERTICAL);
+        body.addView(radioEditorList, matchWrap());
+        loadRadioEditor();
+        return scroll(body);
+    }
+
+    private void loadRadioEditor() {
+        if (radioEditorList == null) return;
+        radioEditorList.removeAllViews();
+        radioEditorList.addView(loading("Načítám stanice…"), matchWrap());
+        api.getJson("/api/config.json", (data, error) -> {
+            if (radioEditorList == null) return;
+            radioEditorList.removeAllViews();
