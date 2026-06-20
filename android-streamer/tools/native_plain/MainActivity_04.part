@@ -1,0 +1,153 @@
+        play.setOnClickListener(v -> playLocalSelection());
+        controls.addView(play, weighted());
+        phonePauseButton = textButton("Pauza", PANEL_3);
+        phonePauseButton.setOnClickListener(v -> {
+            streamer.pauseOrResume();
+            phonePauseButton.setText(streamer.isPaused() ? "Pokračovat" : "Pauza");
+        });
+        controls.addView(phonePauseButton, weighted());
+        Button next = textButton("⏭", PANEL_3);
+        next.setOnClickListener(v -> streamer.next());
+        controls.addView(next, weighted());
+        player.addView(controls, matchWrapWithMargins(0, 10, 0, 0));
+
+        Button stop = textButton("■ Stop", DANGER);
+        stop.setOnClickListener(v -> streamer.stop());
+        player.addView(stop, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(player, matchWrapWithMargins(0, 0, 0, 12));
+
+        LinearLayout listCard = card();
+        listCard.addView(text("Playlist", 20, TEXT, true), matchWrap());
+        phonePlaylistView = new ListView(this);
+        phonePlaylistView.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+        phonePlaylistView.setDividerHeight(dp(1));
+        phonePlaylistView.setBackgroundColor(PANEL);
+        phonePlaylistAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_single_choice, playlistNames) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                view.setTextColor(TEXT);
+                view.setTextSize(15);
+                view.setPadding(dp(12), dp(10), dp(12), dp(10));
+                return view;
+            }
+        };
+        phonePlaylistView.setAdapter(phonePlaylistAdapter);
+        phonePlaylistView.setOnItemClickListener((parent, view, position, id) -> {
+            selectedTrackIndex = position;
+            phoneTrackTitle.setText(playlistNames.get(position));
+        });
+        if (!playlistNames.isEmpty()) phonePlaylistView.setItemChecked(selectedTrackIndex, true);
+        listCard.addView(phonePlaylistView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(300)));
+        body.addView(listCard, matchWrap());
+        return scroll(body);
+    }
+
+    private void playLocalSelection() {
+        if (playlistUris.isEmpty()) {
+            toast("Nejdřív vyber skladby");
+            return;
+        }
+        if (sendspin.isProtocolReady()) {
+            streamer.play(playlistUris, playlistNames, selectedTrackIndex);
+            return;
+        }
+        pendingLocalPlay = true;
+        sendspinRetryCount = 0;
+        connectMobileAudio(true);
+    }
+
+    private void connectMobileAudio(boolean forPlayback) {
+        if (forPlayback) pendingLocalPlay = true;
+        if (sendspin.isConnected()) sendspin.close();
+        if (phoneConnectionStatus != null) phoneConnectionStatus.setText("Připojuji " + radioHost + ":" + sendspinPort + "…");
+        sendspin.connectAsync(radioHost, sendspinPort);
+    }
+
+    private View buildSystemAudioPage() {
+        LinearLayout body = verticalBody();
+        LinearLayout card = card();
+        card.addView(text("Stream systémového zvuku", 21, TEXT, true), matchWrap());
+        card.addView(text(
+                "Android zachytí zvuk aplikací, které to dovolují, a pošle ho přes Wi‑Fi přímo do rádia. " +
+                        "Po spuštění Android zobrazí potvrzení sdílení.",
+                14, MUTED, false), matchWrapWithMargins(0, 6, 0, 12));
+
+        systemAudioStatus = text("Stream je zastavený.", 14, TEXT, false);
+        systemAudioStatus.setPadding(dp(12), dp(10), dp(12), dp(10));
+        systemAudioStatus.setBackground(round(PANEL_2, dp(10), LINE, dp(1)));
+        card.addView(systemAudioStatus, matchWrap());
+
+        systemAudioStart = textButton("Spustit stream zvuku", ACCENT);
+        systemAudioStart.setOnClickListener(v -> requestSystemAudioCapture());
+        card.addView(systemAudioStart, matchWrapWithMargins(0, 12, 0, 0));
+
+        systemAudioStop = textButton("Zastavit stream", DANGER);
+        systemAudioStop.setEnabled(false);
+        systemAudioStop.setOnClickListener(v -> stopSystemAudioCapture());
+        card.addView(systemAudioStop, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(card, matchWrap());
+
+        LinearLayout note = card();
+        note.addView(text("Co Android pustí", 18, TEXT, true), matchWrap());
+        note.addView(text(
+                "Hudba, prohlížeč, hry a video obvykle fungují. Aplikace může zachycení svého zvuku zakázat; " +
+                        "v takovém případě rádio dostane ticho. Aplikace ukazuje živou úroveň zachyceného zvuku.",
+                13, MUTED, false), matchWrap());
+        body.addView(note, matchWrapWithMargins(0, 12, 0, 0));
+        return scroll(body);
+    }
+
+    private View buildFilesPage() {
+        LinearLayout body = verticalBody();
+        LinearLayout toolbar = card();
+        toolbar.addView(text("Soubory v rádiu", 20, TEXT, true), matchWrap());
+
+        LinearLayout disks = horizontalRow();
+        Button ffat = textButton("Interní FFat", filesDisk.equals("ffat") ? ACCENT : PANEL_3);
+        ffat.setOnClickListener(v -> { filesDisk = "ffat"; filesPath = "/"; showPage(Page.FILES); });
+        disks.addView(ffat, weighted());
+        Button usb = textButton("USB disk", filesDisk.equals("usb0") ? ACCENT : PANEL_3);
+        usb.setOnClickListener(v -> { filesDisk = "usb0"; filesPath = "/"; showPage(Page.FILES); });
+        disks.addView(usb, weighted());
+        toolbar.addView(disks, matchWrapWithMargins(0, 8, 0, 0));
+
+        filesPathLabel = text(filesDisk + ": " + filesPath, 13, ACCENT_2, true);
+        toolbar.addView(filesPathLabel, matchWrapWithMargins(0, 10, 0, 0));
+
+        LinearLayout pathActions = horizontalRow();
+        Button up = textButton("↑ Nahoru", PANEL_3);
+        up.setOnClickListener(v -> { filesPath = parentPath(filesPath); loadFiles(); });
+        pathActions.addView(up, weighted());
+        Button folderPlay = textButton("▶ Přehrát složku", ACCENT);
+        folderPlay.setOnClickListener(v -> api.getText(
+                "/audio/play_folder?disk=" + enc(filesDisk) + "&p=" + enc(filesPath),
+                (text, error) -> actionResult(text, error)));
+        pathActions.addView(folderPlay, weighted());
+        Button refresh = textButton("Obnovit", PANEL_3);
+        refresh.setOnClickListener(v -> loadFiles());
+        pathActions.addView(refresh, weighted());
+        toolbar.addView(pathActions, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(toolbar, matchWrapWithMargins(0, 0, 0, 10));
+
+        filesList = new LinearLayout(this);
+        filesList.setOrientation(LinearLayout.VERTICAL);
+        body.addView(filesList, matchWrap());
+        loadFiles();
+        return scroll(body);
+    }
+
+    private void loadFiles() {
+        if (filesList == null) return;
+        filesPathLabel.setText(filesDisk + ": " + filesPath);
+        filesList.removeAllViews();
+        filesList.addView(loading("Načítám soubory…"), matchWrap());
+        String path = "/api/files.json?disk=" + enc(filesDisk) + "&p=" + enc(filesPath);
+        api.getJson(path, (data, error) -> {
+            if (filesList == null) return;
+            filesList.removeAllViews();
+            if (error != null) {
+                filesList.addView(errorBox(error.getMessage()), matchWrap());
+                return;
+            }
