@@ -1,0 +1,170 @@
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        preferences = getSharedPreferences("oris_audio", MODE_PRIVATE);
+        loadSettings();
+        api = new OrisApi(this, radioHost, webUser, webPassword);
+        mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        nsdManager = (NsdManager) getSystemService(Context.NSD_SERVICE);
+        acquireMulticastLock();
+        initSendspin();
+
+        setContentView(buildShell());
+        registerSystemAudioReceiver();
+        showPage(Page.PLAYER);
+        refreshConfig(true);
+        mainHandler.post(statusTicker);
+    }
+
+    private void loadSettings() {
+        radioHost = preferences.getString("radio_host", "192.168.1.177");
+        sendspinPort = preferences.getInt("sendspin_port", DEFAULT_SENDSPIN_PORT);
+        webUser = preferences.getString("web_user", "admin");
+        webPassword = preferences.getString("web_pass", "admin");
+    }
+
+    private void saveSettings(String host, int port, String user, String password) {
+        radioHost = cleanHost(host);
+        sendspinPort = port > 0 && port < 65536 ? port : DEFAULT_SENDSPIN_PORT;
+        webUser = user == null || user.trim().isEmpty() ? "admin" : user.trim();
+        webPassword = password == null ? "" : password;
+        preferences.edit()
+                .putString("radio_host", radioHost)
+                .putInt("sendspin_port", sendspinPort)
+                .putString("web_user", webUser)
+                .putString("web_pass", webPassword)
+                .apply();
+        api.configure(radioHost, webUser, webPassword);
+    }
+
+    private void initSendspin() {
+        sendspin = new SendspinConnection(new SendspinConnection.Listener() {
+            @Override
+            public void onStatus(String message) {
+                runOnUiThread(() -> {
+                    if (phoneConnectionStatus != null) phoneConnectionStatus.setText(message);
+                    setBottomStatus(message, MUTED);
+                });
+            }
+
+            @Override
+            public void onReady(String radioName) {
+                runOnUiThread(() -> {
+                    sendspinRetryCount = 0;
+                    if (phoneConnectionStatus != null) phoneConnectionStatus.setText("Připojeno: " + radioName);
+                    setBottomStatus("Mobilní audio připojeno k " + radioName, OK);
+                    if (pendingLocalPlay) {
+                        pendingLocalPlay = false;
+                        streamer.play(playlistUris, playlistNames, selectedTrackIndex);
+                    }
+                });
+            }
+
+            @Override
+            public void onDisconnected(String reason) {
+                runOnUiThread(() -> {
+                    if (phoneConnectionStatus != null) phoneConnectionStatus.setText(reason);
+                    setBottomStatus(reason, DANGER);
+                    if (pendingLocalPlay && sendspinRetryCount < 2) {
+                        sendspinRetryCount++;
+                        mainHandler.postDelayed(() -> sendspin.connectAsync(radioHost, sendspinPort), 900L);
+                    } else {
+                        pendingLocalPlay = false;
+                    }
+                });
+            }
+
+            @Override
+            public void onRadioVolume(int volume) {
+                runOnUiThread(() -> {
+                    if (playerVolume != null && !playerVolume.isPressed()) playerVolume.setProgress(volume);
+                });
+            }
+        });
+
+        streamer = new AudioStreamer(this, sendspin, new AudioStreamer.Listener() {
+            @Override
+            public void onStatus(String message) {
+                runOnUiThread(() -> setBottomStatus(message, MUTED));
+            }
+
+            @Override
+            public void onTrackChanged(int index, String name) {
+                runOnUiThread(() -> {
+                    selectedTrackIndex = index;
+                    if (phoneTrackTitle != null) phoneTrackTitle.setText(name);
+                    if (phonePlaylistView != null) phonePlaylistView.setItemChecked(index, true);
+                    if (phonePauseButton != null) phonePauseButton.setText("Pauza");
+                });
+            }
+
+            @Override
+            public void onProgress(long positionMs, long durationMs) {
+                runOnUiThread(() -> {
+                    if (phoneProgress != null) {
+                        phoneProgress.setText(formatTime(positionMs) + " / " + formatTime(durationMs));
+                    }
+                    if (phoneProgressBar != null) {
+                        phoneProgressBar.setProgress(durationMs > 0
+                                ? (int) Math.min(1000L, positionMs * 1000L / durationMs)
+                                : 0);
+                    }
+                });
+            }
+
+            @Override
+            public void onStopped() {
+                runOnUiThread(() -> {
+                    if (phonePauseButton != null) phonePauseButton.setText("Pauza");
+                    if (phoneProgress != null) phoneProgress.setText("00:00 / 00:00");
+                    if (phoneProgressBar != null) phoneProgressBar.setProgress(0);
+                });
+            }
+        });
+    }
+
+    private View buildShell() {
+        root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(8), dp(7), dp(8), dp(7));
+        header.setBackgroundColor(Color.rgb(13, 17, 24));
+
+        Button menu = textButton("☰", PANEL_2);
+        menu.setTextSize(22);
+        menu.setOnClickListener(this::showMenu);
+        header.addView(menu, new LinearLayout.LayoutParams(dp(52), dp(48)));
+
+        LinearLayout titleBox = new LinearLayout(this);
+        titleBox.setOrientation(LinearLayout.VERTICAL);
+        titleBox.setPadding(dp(10), 0, 0, 0);
+        TextView brand = text("ORIS RADIO", 12, ACCENT_2, true);
+        pageTitle = text("Přehrávač", 19, TEXT, true);
+        titleBox.addView(brand);
+        titleBox.addView(pageTitle);
+        header.addView(titleBox, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        headerConnection = text("● offline", 12, MUTED, true);
+        headerConnection.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        header.addView(headerConnection, new LinearLayout.LayoutParams(dp(100), dp(48)));
+
+        root.addView(header, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        View line = new View(this);
+        line.setBackgroundColor(LINE);
+        root.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
+        pageHost = new FrameLayout(this);
+        pageHost.setBackgroundColor(BG);
+        root.addView(pageHost, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        bottomStatus = text("Připraveno", 11, MUTED, false);
+        bottomStatus.setSingleLine(true);
+        bottomStatus.setPadding(dp(12), dp(7), dp(12), dp(7));
+        bottomStatus.setBackgroundColor(Color.rgb(10, 13, 18));
+        root.addView(bottomStatus, new LinearLayout.LayoutParams(
