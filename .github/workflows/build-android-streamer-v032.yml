@@ -52,3 +52,4 @@ jobs:
           name: ORIS-Mobile-Audio-v0.3.3-source
           path: dist/ORIS-Mobile-Audio-v0.3.3-source.zip
           if-no-files-found: error
+      # verified locally against the final 0.3.2 source tree
