@@ -1,0 +1,161 @@
+            if (error != null) {
+                radioEditorList.addView(errorBox(error.getMessage()), matchWrap());
+                return;
+            }
+            lastConfig = data;
+            JSONArray stations = data.optJSONArray("radioStations");
+            cachedStations.clear();
+            radioNameEditors.clear();
+            radioUrlEditors.clear();
+            if (stations == null) return;
+            for (int i = 0; i < stations.length(); i++) {
+                JSONObject station = stations.optJSONObject(i);
+                if (station == null) continue;
+                cachedStations.add(station);
+                radioEditorList.addView(buildStationEditor(station), matchWrapWithMargins(0, 0, 0, 10));
+            }
+        });
+    }
+
+    private View buildStationEditor(JSONObject station) {
+        int index = station.optInt("index", radioNameEditors.size());
+        LinearLayout box = card();
+
+        LinearLayout top = horizontalRow();
+        ImageView logo = new ImageView(this);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        logo.setImageResource(android.R.drawable.ic_media_play);
+        logo.setBackground(round(PANEL_3, dp(12), LINE, dp(1)));
+        top.addView(logo, new LinearLayout.LayoutParams(dp(82), dp(82)));
+
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.setPadding(dp(12), 0, 0, 0);
+        TextView number = text("STANICE " + (index + 1), 12, ACCENT_2, true);
+        info.addView(number, matchWrap());
+        TextView current = text(station.optString("name", "Stanice " + (index + 1)), 18, TEXT, true);
+        info.addView(current, matchWrap());
+        top.addView(info, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        box.addView(top, matchWrap());
+
+        loadLogo(logo, station.optString("logo", ""));
+
+        EditText name = input("Název stanice", station.optString("name", ""), false);
+        radioNameEditors.add(name);
+        box.addView(name, matchWrapWithMargins(0, 10, 0, 0));
+
+        EditText url = input("HTTP MP3 URL", station.optString("url", ""), false);
+        radioUrlEditors.add(url);
+        box.addView(url, matchWrapWithMargins(0, 8, 0, 0));
+
+        LinearLayout buttons = horizontalRow();
+        Button play = textButton("▶ Přehrát", ACCENT);
+        play.setEnabled(!station.optString("url", "").isEmpty());
+        play.setOnClickListener(v -> playStation(index));
+        buttons.addView(play, weighted());
+
+        Button upload = textButton("Logo", PANEL_3);
+        upload.setOnClickListener(v -> chooseStationLogo(index));
+        buttons.addView(upload, weighted());
+
+        Button delete = textButton("Smazat logo", DANGER);
+        delete.setOnClickListener(v -> deleteStationLogo(index));
+        buttons.addView(delete, weighted());
+        box.addView(buttons, matchWrapWithMargins(0, 10, 0, 0));
+        return box;
+    }
+
+    private void saveRadioStations() {
+        Map<String, String> values = new LinkedHashMap<>();
+        int count = Math.min(radioNameEditors.size(), radioUrlEditors.size());
+        for (int i = 0; i < count; i++) {
+            int index = i < cachedStations.size() ? cachedStations.get(i).optInt("index", i) : i;
+            values.put("radio_name_" + index, radioNameEditors.get(i).getText().toString().trim());
+            values.put("radio_url_" + index, radioUrlEditors.get(i).getText().toString().trim());
+        }
+        setBottomStatus("Ukládám stanice…", MUTED);
+        api.postForm("/radio/save", values, (text, error) -> {
+            if (error != null) setBottomStatus("Uložení selhalo: " + error.getMessage(), DANGER);
+            else {
+                setBottomStatus(text == null || text.trim().isEmpty() ? "Stanice uloženy" : text.trim(), OK);
+                refreshConfig(true);
+                loadRadioEditor();
+            }
+        });
+    }
+
+    private void chooseStationLogo(int index) {
+        pendingLogoIndex = index;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        startActivityForResult(intent, PICK_STATION_LOGO);
+    }
+
+    private void deleteStationLogo(int index) {
+        new AlertDialog.Builder(this)
+                .setTitle("Smazat logo")
+                .setMessage("Opravdu smazat logo stanice " + (index + 1) + "?")
+                .setNegativeButton("Ne", null)
+                .setPositiveButton("Ano", (dialog, which) -> {
+                    Map<String, String> data = new LinkedHashMap<>();
+                    data.put("i", String.valueOf(index));
+                    api.postForm("/radio/logo/delete", data, (text, error) -> {
+                        if (error != null) setBottomStatus(error.getMessage(), DANGER);
+                        else {
+                            setBottomStatus(text, OK);
+                            refreshConfig(true);
+                            loadRadioEditor();
+                        }
+                    });
+                })
+                .show();
+    }
+
+    private View buildPhoneMusicPage() {
+        LinearLayout body = verticalBody();
+
+        LinearLayout connectionCard = card();
+        TextView heading = text("Přímé přehrávání z telefonu", 20, TEXT, true);
+        connectionCard.addView(heading, matchWrap());
+        phoneConnectionStatus = text(sendspin.isProtocolReady()
+                ? "Připojeno přes Sendspin"
+                : "Rádio se připojí automaticky při přehrávání.", 13, MUTED, false);
+        connectionCard.addView(phoneConnectionStatus, matchWrap());
+
+        LinearLayout connButtons = horizontalRow();
+        Button connect = textButton("Připojit", ACCENT);
+        connect.setOnClickListener(v -> connectMobileAudio(false));
+        connButtons.addView(connect, weighted());
+        Button disconnect = textButton("Odpojit", PANEL_3);
+        disconnect.setOnClickListener(v -> {
+            pendingLocalPlay = false;
+            streamer.stop();
+            sendspin.close();
+        });
+        connButtons.addView(disconnect, weighted());
+        connectionCard.addView(connButtons, matchWrapWithMargins(0, 10, 0, 0));
+        body.addView(connectionCard, matchWrapWithMargins(0, 0, 0, 12));
+
+        LinearLayout player = card();
+        Button choose = textButton("Vybrat skladby z telefonu", ACCENT);
+        choose.setOnClickListener(v -> chooseAudioFiles());
+        player.addView(choose, matchWrap());
+
+        phoneTrackTitle = text(playlistNames.isEmpty() ? "Není vybraná skladba" : playlistNames.get(selectedTrackIndex), 20, TEXT, true);
+        phoneTrackTitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        phoneTrackTitle.setPadding(0, dp(14), 0, dp(6));
+        player.addView(phoneTrackTitle, matchWrap());
+
+        phoneProgress = text("00:00 / 00:00", 13, MUTED, false);
+        phoneProgress.setGravity(Gravity.CENTER_HORIZONTAL);
+        player.addView(phoneProgress, matchWrap());
+        phoneProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        phoneProgressBar.setMax(1000);
+        player.addView(phoneProgressBar, matchWrap());
+
+        LinearLayout controls = horizontalRow();
+        Button prev = textButton("⏮", PANEL_3);
+        prev.setOnClickListener(v -> streamer.previous());
+        controls.addView(prev, weighted());
+        Button play = textButton("▶ Přehrát", ACCENT);
