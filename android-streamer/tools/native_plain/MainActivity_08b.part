@@ -1,0 +1,72 @@
+        startService(service);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_RECORD_AUDIO) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                requestSystemAudioCapture();
+            } else toast("Bez oprávnění nelze zvuk zachytit");
+        }
+    }
+
+    private void startDiscovery() {
+        if (nsdManager == null) return;
+        stopDiscovery();
+        resolveQueue.clear();
+        resolving = false;
+        if (settingsTestResult != null) settingsTestResult.setText("Hledám rádio v síti…");
+
+        discoveryListener = new NsdManager.DiscoveryListener() {
+            @Override public void onDiscoveryStarted(String serviceType) { setBottomStatus("Hledám ORIS rádio…", MUTED); }
+            @Override public void onServiceLost(NsdServiceInfo serviceInfo) {}
+            @Override public void onDiscoveryStopped(String serviceType) { discoveryRunning = false; }
+            @Override public void onStartDiscoveryFailed(String serviceType, int errorCode) {
+                discoveryRunning = false;
+                runOnUiThread(() -> setBottomStatus("Hledání selhalo: " + errorCode, DANGER));
+            }
+            @Override public void onStopDiscoveryFailed(String serviceType, int errorCode) { discoveryRunning = false; }
+
+            @Override
+            public void onServiceFound(NsdServiceInfo serviceInfo) {
+                String type = serviceInfo.getServiceType();
+                if (type == null || !type.toLowerCase(Locale.ROOT).contains("_sendspin._tcp")) return;
+                synchronized (resolveQueue) { resolveQueue.add(serviceInfo); }
+                resolveNext();
+            }
+        };
+        try {
+            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener);
+            discoveryRunning = true;
+            mainHandler.postDelayed(this::stopDiscovery, 8000L);
+        } catch (Exception e) {
+            setBottomStatus("Hledání nelze spustit: " + e.getMessage(), DANGER);
+        }
+    }
+
+    private void resolveNext() {
+        synchronized (resolveQueue) {
+            if (resolving || resolveQueue.isEmpty()) return;
+            resolving = true;
+            NsdServiceInfo service = resolveQueue.removeFirst();
+            try {
+                nsdManager.resolveService(service, new NsdManager.ResolveListener() {
+                    @Override
+                    public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
+                        synchronized (resolveQueue) { resolving = false; }
+                        resolveNext();
+                    }
+
+                    @Override
+                    public void onServiceResolved(NsdServiceInfo serviceInfo) {
+                        InetAddress address = serviceInfo.getHost();
+                        if (address != null) {
+                            runOnUiThread(() -> {
+                                String host = address.getHostAddress();
+                                int port = serviceInfo.getPort() > 0 ? serviceInfo.getPort() : DEFAULT_SENDSPIN_PORT;
+                                if (settingsHost != null) settingsHost.setText(host);
+                                if (settingsPort != null) settingsPort.setText(String.valueOf(port));
+                                if (settingsTestResult != null) {
+                                    settingsTestResult.setTextColor(OK);
+                                    settingsTestResult.setText("Nalezeno: " + serviceInfo.getServiceName() + " · " + host + ":" + port);
