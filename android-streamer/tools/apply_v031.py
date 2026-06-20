@@ -32,3 +32,4 @@ if api_sha != expected_api_sha:
 print(f"Applied ORIS Mobile Audio 0.3.1 sources: MainActivity={main_sha}, OrisApi={api_sha}")
 runpy.run_path(str(root / "tools" / "apply_v031_features.py"), run_name="__main__")
 runpy.run_path(str(root / "tools" / "apply_v032.py"), run_name="__main__")
+runpy.run_path(str(root / "tools" / "apply_v033.py"), run_name="__main__")
