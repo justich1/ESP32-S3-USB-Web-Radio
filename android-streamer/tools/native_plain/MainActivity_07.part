@@ -1,0 +1,164 @@
+            modeText = paused ? "KARAOKE · PAUZA" : "KARAOKE";
+            subtitle = "Karaoke skladba";
+        } else if ("soubor".equals(mode) || "složka".equals(mode)) {
+            modeText = paused ? "HUDBA · PAUZA" : ("složka".equals(mode) ? "PLAYLIST" : "HUDBA");
+            subtitle = "složka".equals(mode) ? "Přehrávání MP3 ze složky" : "Lokální soubor";
+        }
+
+        playerMode.setText(modeText);
+        playerMainTitle.setText(title == null || title.trim().isEmpty() ? "Přehrávač připraven" : title);
+        playerSubtitle.setText(subtitle);
+        playerDetail.setText(detail);
+        playerPlayPause.setText(paused || !playing ? "▶" : "Ⅱ");
+
+        if (data.optBoolean("batteryEnabled", false) && data.optBoolean("batteryValid", false)) {
+            playerBattery.setText("Baterie " + data.optInt("batteryPercent", 0) + " % · " +
+                    String.format(Locale.getDefault(), "%.2f V", data.optDouble("batteryVoltage", 0.0)));
+        } else {
+            playerBattery.setText("Měření baterie vypnuto");
+        }
+
+        String logo = data.optString("radioLogo", "");
+        if (logo.isEmpty() && radioIndex >= 0) {
+            JSONObject station = stationByIndex(radioIndex);
+            if (station != null) logo = station.optString("logo", "");
+        }
+        loadLogo(playerCover, logo);
+        if (playerStationGrid != null) renderPlayerStations();
+    }
+
+    private void renderPlayerStations() {
+        if (playerStationGrid == null) return;
+        playerStationGrid.removeAllViews();
+        int count = 0;
+        for (JSONObject station : cachedStations) {
+            if (station.optString("url", "").trim().isEmpty()) continue;
+            int index = station.optInt("index", count);
+            boolean active = lastStatus != null && lastStatus.optInt("radioIndex", -1) == index;
+            boolean selected = selectedStationIndex == index;
+            LinearLayout tile = new LinearLayout(this);
+            tile.setOrientation(LinearLayout.VERTICAL);
+            tile.setGravity(Gravity.CENTER_HORIZONTAL);
+            tile.setPadding(dp(8), dp(9), dp(8), dp(9));
+            tile.setBackground(round(active ? Color.rgb(34, 53, 82) : (selected ? PANEL_3 : PANEL_2),
+                    dp(12), active ? ACCENT : LINE, dp(1)));
+            tile.setOnClickListener(v -> playStation(index));
+
+            ImageView image = new ImageView(this);
+            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            image.setImageResource(android.R.drawable.ic_media_play);
+            image.setBackground(round(PANEL_3, dp(10), LINE, dp(1)));
+            tile.addView(image, new LinearLayout.LayoutParams(dp(76), dp(76)));
+            loadLogo(image, station.optString("logo", ""));
+
+            TextView name = text(station.optString("name", "Stanice " + (index + 1)), 14, TEXT, true);
+            name.setGravity(Gravity.CENTER_HORIZONTAL);
+            name.setMaxLines(2);
+            tile.addView(name, matchWrapWithMargins(0, 8, 0, 0));
+            TextView state = text(active ? "PRÁVĚ HRAJE" : "PŘEPNOUT", 10, active ? ACCENT_2 : MUTED, true);
+            state.setGravity(Gravity.CENTER_HORIZONTAL);
+            tile.addView(state, matchWrapWithMargins(0, 3, 0, 0));
+
+            GridLayout.LayoutParams params = new GridLayout.LayoutParams();
+            params.width = 0;
+            params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            params.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
+            params.setMargins(dp(4), dp(4), dp(4), dp(4));
+            playerStationGrid.addView(tile, params);
+            count++;
+        }
+        if (count == 0) playerStationGrid.addView(text("Nejdřív nastav stanice v menu Internetová rádia.", 13, WARN, false));
+    }
+
+    private void togglePlayer() {
+        boolean active = lastStatus != null &&
+                (lastStatus.optBoolean("audioPlaying", false) || lastStatus.optBoolean("audioPaused", false));
+        if (active) audioPost("/audio/toggle_pause");
+        else if (selectedStationIndex >= 0) playStation(selectedStationIndex);
+        else toast("Není nastavená žádná stanice");
+    }
+
+    private void playRelativeStation(int delta) {
+        ArrayList<JSONObject> available = new ArrayList<>();
+        for (JSONObject station : cachedStations) {
+            if (!station.optString("url", "").trim().isEmpty()) available.add(station);
+        }
+        if (available.isEmpty()) return;
+        int current = 0;
+        for (int i = 0; i < available.size(); i++) {
+            if (available.get(i).optInt("index", -1) == selectedStationIndex) current = i;
+        }
+        current = (current + delta + available.size()) % available.size();
+        playStation(available.get(current).optInt("index", 0));
+    }
+
+    private void playStation(int index) {
+        selectedStationIndex = index;
+        api.post("/radio/play?i=" + index, (text, error) -> {
+            actionResult(text, error);
+            if (error == null) mainHandler.postDelayed(() -> refreshStatus(false), 250L);
+        });
+        if (playerStationGrid != null) renderPlayerStations();
+    }
+
+    private void audioPost(String path) {
+        api.post(path, (text, error) -> {
+            actionResult(text, error);
+            if (error == null) mainHandler.postDelayed(() -> refreshStatus(false), 180L);
+        });
+    }
+
+    private void setRadioVolume(int volume) {
+        api.getText("/audio/volume?v=" + volume, (text, error) -> actionResult(text, error));
+    }
+
+    private void loadLogo(ImageView view, String path) {
+        if (view == null) return;
+        if (path == null || path.trim().isEmpty()) {
+            view.setImageResource(android.R.drawable.ic_media_play);
+            return;
+        }
+        api.loadBitmap(path, (bitmap, error) -> {
+            if (view.getWindowToken() == null) return;
+            if (error == null && bitmap != null) view.setImageBitmap(bitmap);
+            else view.setImageResource(android.R.drawable.ic_media_play);
+        });
+    }
+
+    private JSONObject stationByIndex(int index) {
+        for (JSONObject station : cachedStations) {
+            if (station.optInt("index", -1) == index) return station;
+        }
+        return null;
+    }
+
+    private void chooseAudioFiles() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("audio/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(intent, PICK_AUDIO);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQUEST_SYSTEM_AUDIO) {
+            if (resultCode != RESULT_OK || data == null) {
+                if (systemAudioStatus != null) systemAudioStatus.setText("Sdílení zvuku nebylo povoleno.");
+                return;
+            }
+            startSystemAudioService(resultCode, data);
+            return;
+        }
+
+        if (resultCode != RESULT_OK || data == null) return;
+
+        if (requestCode == PICK_STATION_LOGO) {
+            Uri uri = data.getData();
+            if (uri == null || pendingLogoIndex < 0) return;
+            int index = pendingLogoIndex;
+            pendingLogoIndex = -1;
+            setBottomStatus("Nahrávám logo…", MUTED);
+            api.upload(uri, "logo", "/radio/logo?i=" + index, (text, error) -> {
