@@ -33,17 +33,31 @@ jobs:
         with:
           gradle-version: '9.4.1'
 
+      - name: Fix mobile audio sample rate
+        run: python3 android-streamer/tools/fix_audio_speed.py
+
       - name: Build debug APK
         run: gradle -p android-streamer :app:assembleDebug --stacktrace
 
-      - name: Prepare artifact
+      - name: Prepare artifacts
         run: |
           mkdir -p dist
           cp android-streamer/app/build/outputs/apk/debug/app-debug.apk dist/ORIS-Mobile-Audio.apk
+          cp -a android-streamer dist/ORIS-Mobile-Audio-source
+          rm -rf dist/ORIS-Mobile-Audio-source/app/build dist/ORIS-Mobile-Audio-source/.gradle
+          cd dist
+          zip -qr ORIS-Mobile-Audio-source.zip ORIS-Mobile-Audio-source
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ORIS-Mobile-Audio-APK
           path: dist/ORIS-Mobile-Audio.apk
+          if-no-files-found: error
+
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ORIS-Mobile-Audio-source
+          path: dist/ORIS-Mobile-Audio-source.zip
           if-no-files-found: error
