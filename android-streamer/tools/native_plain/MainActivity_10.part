@@ -1,0 +1,62 @@
+        int slash = host.indexOf('/');
+        if (slash >= 0) host = host.substring(0, slash);
+        int colon = host.lastIndexOf(':');
+        if (colon > 0 && host.indexOf(':') == colon) host = host.substring(0, colon);
+        return host.isEmpty() ? "192.168.1.177" : host;
+    }
+
+    private static String enc(String value) {
+        try { return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8.name()); }
+        catch (Exception e) { return value == null ? "" : value; }
+    }
+
+    private static String parentPath(String path) {
+        if (path == null || path.isEmpty() || "/".equals(path)) return "/";
+        String value = path.endsWith("/") && path.length() > 1 ? path.substring(0, path.length() - 1) : path;
+        int slash = value.lastIndexOf('/');
+        return slash <= 0 ? "/" : value.substring(0, slash);
+    }
+
+    private static String fileName(String path) {
+        if (path == null) return "";
+        int slash = path.lastIndexOf('/');
+        return slash >= 0 ? path.substring(slash + 1) : path;
+    }
+
+    private static String firstString(JSONObject object, String first, String second) {
+        String value = object.optString(first, "");
+        return value.isEmpty() ? object.optString(second, "") : value;
+    }
+
+    private static String niceBytes(long value) {
+        if (value < 1024) return value + " B";
+        if (value < 1024 * 1024) return String.format(Locale.getDefault(), "%.1f KB", value / 1024.0);
+        return String.format(Locale.getDefault(), "%.1f MB", value / 1024.0 / 1024.0);
+    }
+
+    private static String formatTime(long millis) {
+        long total = Math.max(0, millis / 1000L);
+        return String.format(Locale.getDefault(), "%02d:%02d", total / 60L, total % 60L);
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    @Override
+    protected void onDestroy() {
+        mainHandler.removeCallbacks(statusTicker);
+        stopDiscovery();
+        if (statusReceiverRegistered) {
+            try { unregisterReceiver(systemAudioStatusReceiver); }
+            catch (Exception ignored) {}
+        }
+        pendingLocalPlay = false;
+        streamer.stop();
+        sendspin.close();
+        try {
+            if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
+        } catch (Exception ignored) {}
+        super.onDestroy();
+    }
+}
