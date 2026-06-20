@@ -1,4 +1,4 @@
-name: Build ORIS Mobile Audio 0.3.2
+name: Build ORIS Mobile Audio 0.3.3
 
 on:
   push:
@@ -28,29 +28,27 @@ jobs:
         run: python3 android-streamer/tools/assemble_native.py
       - name: Prepare audio and Sendspin
         run: python3 android-streamer/tools/prepare_native_build.py
-      - name: Apply 0.3.1 native UI and API
+      - name: Apply native app versions 0.3.1 to 0.3.3
         run: python3 android-streamer/tools/apply_v031.py
-      - name: Apply 0.3.2 changes
-        run: python3 android-streamer/tools/apply_v032.py
       - name: Build debug APK
         run: gradle -p android-streamer :app:assembleDebug --stacktrace
       - name: Prepare artifacts
         run: |
           mkdir -p dist
-          cp android-streamer/app/build/outputs/apk/debug/app-debug.apk dist/ORIS-Mobile-Audio-v0.3.2.apk
-          cp -a android-streamer dist/ORIS-Mobile-Audio-v0.3.2-source
-          rm -rf dist/ORIS-Mobile-Audio-v0.3.2-source/app/build dist/ORIS-Mobile-Audio-v0.3.2-source/.gradle
+          cp android-streamer/app/build/outputs/apk/debug/app-debug.apk dist/ORIS-Mobile-Audio-v0.3.3.apk
+          cp -a android-streamer dist/ORIS-Mobile-Audio-v0.3.3-source
+          rm -rf dist/ORIS-Mobile-Audio-v0.3.3-source/app/build dist/ORIS-Mobile-Audio-v0.3.3-source/.gradle
           cd dist
-          zip -qr ORIS-Mobile-Audio-v0.3.2-source.zip ORIS-Mobile-Audio-v0.3.2-source
+          zip -qr ORIS-Mobile-Audio-v0.3.3-source.zip ORIS-Mobile-Audio-v0.3.3-source
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ORIS-Mobile-Audio-v0.3.2-APK
-          path: dist/ORIS-Mobile-Audio-v0.3.2.apk
+          name: ORIS-Mobile-Audio-v0.3.3-APK
+          path: dist/ORIS-Mobile-Audio-v0.3.3.apk
           if-no-files-found: error
       - name: Upload source
         uses: actions/upload-artifact@v4
         with:
-          name: ORIS-Mobile-Audio-v0.3.2-source
-          path: dist/ORIS-Mobile-Audio-v0.3.2-source.zip
+          name: ORIS-Mobile-Audio-v0.3.3-source
+          path: dist/ORIS-Mobile-Audio-v0.3.3-source.zip
           if-no-files-found: error
