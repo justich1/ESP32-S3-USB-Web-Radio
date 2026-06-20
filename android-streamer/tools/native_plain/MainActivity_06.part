@@ -1,0 +1,153 @@
+                13, MUTED, false), matchWrapWithMargins(0, 4, 0, 10));
+
+        settingsHost = input("IP adresa nebo mDNS jméno", radioHost, false);
+        connection.addView(settingsHost, matchWrap());
+        settingsPort = input("Sendspin port", String.valueOf(sendspinPort), false);
+        settingsPort.setInputType(InputType.TYPE_CLASS_NUMBER);
+        connection.addView(settingsPort, matchWrapWithMargins(0, 8, 0, 0));
+        settingsUser = input("Web uživatel", webUser, false);
+        connection.addView(settingsUser, matchWrapWithMargins(0, 8, 0, 0));
+        settingsPassword = input("Web heslo", webPassword, true);
+        connection.addView(settingsPassword, matchWrapWithMargins(0, 8, 0, 0));
+
+        LinearLayout buttons = horizontalRow();
+        Button save = textButton("Uložit a otestovat", ACCENT);
+        save.setOnClickListener(v -> saveAndTestSettings());
+        buttons.addView(save, weighted());
+        Button find = textButton("Najít rádio", PANEL_3);
+        find.setOnClickListener(v -> startDiscovery());
+        buttons.addView(find, weighted());
+        connection.addView(buttons, matchWrapWithMargins(0, 10, 0, 0));
+
+        settingsTestResult = text("", 13, MUTED, false);
+        settingsTestResult.setPadding(dp(10), dp(8), dp(10), dp(8));
+        connection.addView(settingsTestResult, matchWrap());
+        body.addView(connection, matchWrapWithMargins(0, 0, 0, 12));
+
+        LinearLayout device = card();
+        device.addView(text("Zařízení", 20, TEXT, true), matchWrap());
+        Button refresh = textButton("Načíst stav zařízení", PANEL_3);
+        refresh.setOnClickListener(v -> loadDeviceSummary(device));
+        device.addView(refresh, matchWrapWithMargins(0, 8, 0, 0));
+        Button reboot = textButton("Restartovat ESP32", DANGER);
+        reboot.setOnClickListener(v -> confirmReboot());
+        device.addView(reboot, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(device, matchWrap());
+        loadDeviceSummary(device);
+        return scroll(body);
+    }
+
+    private void saveAndTestSettings() {
+        String host = settingsHost.getText().toString();
+        int port;
+        try { port = Integer.parseInt(settingsPort.getText().toString().trim()); }
+        catch (Exception e) { port = DEFAULT_SENDSPIN_PORT; }
+        saveSettings(host, port, settingsUser.getText().toString(), settingsPassword.getText().toString());
+        settingsHost.setText(radioHost);
+        settingsPort.setText(String.valueOf(sendspinPort));
+        if (sendspin.isConnected()) sendspin.close();
+        settingsTestResult.setText("Testuji " + radioHost + "…");
+        api.getJson("/status.json", (data, error) -> {
+            if (error != null) {
+                settingsTestResult.setTextColor(DANGER);
+                settingsTestResult.setText("Připojení selhalo: " + error.getMessage());
+                setBottomStatus("Rádio není dostupné", DANGER);
+            } else {
+                settingsTestResult.setTextColor(OK);
+                settingsTestResult.setText("Připojeno. " + data.optString("audioDetail", "Rádio odpovídá."));
+                setBottomStatus("Připojeno k rádiu " + radioHost, OK);
+                refreshConfig(true);
+            }
+        });
+    }
+
+    private void loadDeviceSummary(LinearLayout deviceCard) {
+        api.getJson("/status.json", (data, error) -> {
+            if (error != null) return;
+            for (int i = deviceCard.getChildCount() - 1; i >= 0; i--) {
+                View child = deviceCard.getChildAt(i);
+                if (child.getTag() != null && child.getTag().equals("summary")) deviceCard.removeViewAt(i);
+            }
+            LinearLayout summary = new LinearLayout(this);
+            summary.setTag("summary");
+            summary.setOrientation(LinearLayout.VERTICAL);
+            summary.setPadding(0, dp(10), 0, 0);
+            summary.addView(metric("Wi‑Fi", data.optString("wifiSsid", "offline") + " · " + data.optInt("rssi", 0) + " dBm"));
+            summary.addView(metric("Výstup", data.optString("audioOutput", "")));
+            summary.addView(metric("USB", data.optString("usb", "")));
+            summary.addView(metric("PSRAM", data.optString("psramFree", "")));
+            summary.addView(metric("Uptime", data.optString("uptime", "")));
+            deviceCard.addView(summary, matchWrap());
+        });
+    }
+
+    private void confirmReboot() {
+        new AlertDialog.Builder(this)
+                .setTitle("Restartovat rádio")
+                .setMessage("Opravdu restartovat ESP32?")
+                .setNegativeButton("Ne", null)
+                .setPositiveButton("Restartovat", (dialog, which) -> api.post("/reboot", this::actionResult))
+                .show();
+    }
+
+    private void refreshStatus(boolean showErrors) {
+        api.getJson("/status.json", (data, error) -> {
+            if (error != null) {
+                headerConnection.setText("● offline");
+                headerConnection.setTextColor(DANGER);
+                if (showErrors) setBottomStatus(error.getMessage(), DANGER);
+                return;
+            }
+            lastStatus = data;
+            headerConnection.setText("● online");
+            headerConnection.setTextColor(OK);
+            if (currentPage == Page.PLAYER) updatePlayerFromStatus(data);
+        });
+    }
+
+    private void refreshConfig(boolean updateVisible) {
+        api.getJson("/api/config.json", (data, error) -> {
+            if (error != null) {
+                if (updateVisible) setBottomStatus("Konfigurace: " + error.getMessage(), DANGER);
+                return;
+            }
+            lastConfig = data;
+            cachedStations.clear();
+            JSONArray stations = data.optJSONArray("radioStations");
+            if (stations != null) {
+                for (int i = 0; i < stations.length(); i++) {
+                    JSONObject station = stations.optJSONObject(i);
+                    if (station != null) cachedStations.add(station);
+                }
+            }
+            if (selectedStationIndex < 0) {
+                for (JSONObject station : cachedStations) {
+                    if (!station.optString("url", "").isEmpty()) {
+                        selectedStationIndex = station.optInt("index", 0);
+                        break;
+                    }
+                }
+            }
+            if (currentPage == Page.PLAYER && playerStationGrid != null) renderPlayerStations();
+            if (playerVolume != null && !playerVolume.isPressed()) {
+                playerVolume.setProgress(data.optInt("audioVolume", 50));
+            }
+        });
+    }
+
+    private void updatePlayerFromStatus(JSONObject data) {
+        if (playerMainTitle == null) return;
+        boolean playing = data.optBoolean("audioPlaying", false);
+        boolean paused = data.optBoolean("audioPaused", false);
+        String mode = data.optString("audio", "připraveno");
+        String title = data.optString("audioTitle", "Přehrávač připraven");
+        String detail = data.optString("audioDetail", mode);
+        int radioIndex = data.optInt("radioIndex", -1);
+        if (radioIndex >= 0) selectedStationIndex = radioIndex;
+
+        String modeText = "PŘIPRAVENO";
+        String subtitle = "Vyber stanici a spusť přehrávání.";
+        if ("radio".equals(mode)) {
+            modeText = paused ? "RÁDIO · PAUZA" : "INTERNETOVÉ RÁDIO";
+            subtitle = paused ? "Přehrávání je pozastavené." : "Živý MP3 stream";
+        } else if ("karaoke".equals(mode)) {
