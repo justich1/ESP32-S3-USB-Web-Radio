@@ -2,6 +2,7 @@ from pathlib import Path
 import base64
 import gzip
 import hashlib
+import runpy
 
 root = Path(__file__).resolve().parents[1]
 source_dir = root / "tools" / "v031"
@@ -29,3 +30,4 @@ if api_sha != expected_api_sha:
 (java_dir / "OrisApi.java").write_bytes(api_source)
 
 print(f"Applied ORIS Mobile Audio 0.3.1 sources: MainActivity={main_sha}, OrisApi={api_sha}")
+runpy.run_path(str(root / "tools" / "apply_v031_features.py"), run_name="__main__")
