@@ -33,11 +33,14 @@ jobs:
         with:
           gradle-version: '9.4.1'
 
-      - name: Assemble native sources
+      - name: Assemble native base sources
         run: python3 android-streamer/tools/assemble_native.py
 
       - name: Prepare audio and Sendspin
         run: python3 android-streamer/tools/prepare_native_build.py
+
+      - name: Apply 0.3.1 native UI and API
+        run: python3 android-streamer/tools/apply_v031.py
 
       - name: Build debug APK
         run: gradle -p android-streamer :app:assembleDebug --stacktrace
@@ -45,22 +48,22 @@ jobs:
       - name: Prepare artifacts
         run: |
           mkdir -p dist
-          cp android-streamer/app/build/outputs/apk/debug/app-debug.apk dist/ORIS-Mobile-Audio-v0.3.0.apk
-          cp -a android-streamer dist/ORIS-Mobile-Audio-v0.3.0-source
-          rm -rf dist/ORIS-Mobile-Audio-v0.3.0-source/app/build dist/ORIS-Mobile-Audio-v0.3.0-source/.gradle
+          cp android-streamer/app/build/outputs/apk/debug/app-debug.apk dist/ORIS-Mobile-Audio-v0.3.1.apk
+          cp -a android-streamer dist/ORIS-Mobile-Audio-v0.3.1-source
+          rm -rf dist/ORIS-Mobile-Audio-v0.3.1-source/app/build dist/ORIS-Mobile-Audio-v0.3.1-source/.gradle
           cd dist
-          zip -qr ORIS-Mobile-Audio-v0.3.0-source.zip ORIS-Mobile-Audio-v0.3.0-source
+          zip -qr ORIS-Mobile-Audio-v0.3.1-source.zip ORIS-Mobile-Audio-v0.3.1-source
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ORIS-Mobile-Audio-v0.3.0-APK
-          path: dist/ORIS-Mobile-Audio-v0.3.0.apk
+          name: ORIS-Mobile-Audio-v0.3.1-APK
+          path: dist/ORIS-Mobile-Audio-v0.3.1.apk
           if-no-files-found: error
 
       - name: Upload source
         uses: actions/upload-artifact@v4
         with:
-          name: ORIS-Mobile-Audio-v0.3.0-source
-          path: dist/ORIS-Mobile-Audio-v0.3.0-source.zip
+          name: ORIS-Mobile-Audio-v0.3.1-source
+          path: dist/ORIS-Mobile-Audio-v0.3.1-source.zip
           if-no-files-found: error
