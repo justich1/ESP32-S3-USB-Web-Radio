@@ -1,0 +1,192 @@
+                                }
+                                setBottomStatus("Nalezeno rádio " + host, OK);
+                            });
+                        }
+                        synchronized (resolveQueue) { resolving = false; }
+                        resolveNext();
+                    }
+                });
+            } catch (Exception e) {
+                resolving = false;
+                resolveNext();
+            }
+        }
+    }
+
+    private void stopDiscovery() {
+        if (!discoveryRunning || discoveryListener == null || nsdManager == null) return;
+        try { nsdManager.stopServiceDiscovery(discoveryListener); }
+        catch (Exception ignored) {}
+        discoveryRunning = false;
+    }
+
+    private void acquireMulticastLock() {
+        try {
+            WifiManager manager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            multicastLock = manager.createMulticastLock("oris-radio-discovery");
+            multicastLock.setReferenceCounted(false);
+            multicastLock.acquire();
+        } catch (Exception ignored) {}
+    }
+
+    private void registerSystemAudioReceiver() {
+        IntentFilter filter = new IntentFilter(SystemAudioCaptureService.ACTION_STATUS);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(systemAudioStatusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(systemAudioStatusReceiver, filter);
+        statusReceiverRegistered = true;
+    }
+
+    private void actionResult(String text, Exception error) {
+        if (error != null) setBottomStatus(error.getMessage(), DANGER);
+        else setBottomStatus(text == null || text.trim().isEmpty() ? "Hotovo" : text.trim(), OK);
+    }
+
+    private void setBottomStatus(String text, int color) {
+        if (bottomStatus == null) return;
+        bottomStatus.setText(text == null ? "" : text);
+        bottomStatus.setTextColor(color);
+    }
+
+    private LinearLayout verticalBody() {
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(14), dp(14), dp(14), dp(22));
+        body.setBackgroundColor(BG);
+        return body;
+    }
+
+    private ScrollView scroll(View content) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(BG);
+        scroll.addView(content);
+        return scroll;
+    }
+
+    private LinearLayout card() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(15), dp(15), dp(15), dp(15));
+        card.setBackground(round(PANEL, dp(14), LINE, dp(1)));
+        return card;
+    }
+
+    private TextView metric(String name, String value) {
+        TextView view = text(name + "\n" + value, 13, TEXT, false);
+        view.setPadding(dp(12), dp(10), dp(12), dp(10));
+        view.setBackground(round(PANEL_2, dp(10), LINE, dp(1)));
+        LinearLayout.LayoutParams p = matchWrapWithMargins(0, 0, 0, 6);
+        view.setLayoutParams(p);
+        return view;
+    }
+
+    private TextView loading(String message) {
+        TextView view = text(message, 14, MUTED, false);
+        view.setGravity(Gravity.CENTER_HORIZONTAL);
+        view.setPadding(dp(12), dp(24), dp(12), dp(24));
+        return view;
+    }
+
+    private TextView errorBox(String message) {
+        TextView view = text(message == null ? "Chyba" : message, 14, Color.rgb(255, 116, 116), false);
+        view.setPadding(dp(12), dp(12), dp(12), dp(12));
+        view.setBackground(round(Color.rgb(45, 25, 29), dp(10), DANGER, dp(1)));
+        return view;
+    }
+
+    private TextView pill(String value, int color) {
+        TextView view = text(value, 11, Color.WHITE, true);
+        view.setGravity(Gravity.CENTER);
+        view.setPadding(dp(11), dp(6), dp(11), dp(6));
+        view.setBackground(round(color, dp(20), color, 0));
+        return view;
+    }
+
+    private EditText input(String hint, String value, boolean password) {
+        EditText edit = new EditText(this);
+        edit.setHint(hint);
+        edit.setHintTextColor(MUTED);
+        edit.setTextColor(TEXT);
+        edit.setText(value == null ? "" : value);
+        edit.setSingleLine(true);
+        edit.setPadding(dp(12), dp(10), dp(12), dp(10));
+        edit.setBackground(round(Color.rgb(16, 22, 31), dp(10), Color.rgb(51, 66, 84), dp(1)));
+        if (password) edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        return edit;
+    }
+
+    private TextView text(String value, float size, int color, boolean bold) {
+        TextView view = new TextView(this);
+        view.setText(value);
+        view.setTextSize(size);
+        view.setTextColor(color);
+        if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        return view;
+    }
+
+    private Button textButton(String value, int color) {
+        Button button = new Button(this);
+        button.setText(value);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(13);
+        button.setAllCaps(false);
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setPadding(dp(8), 0, dp(8), 0);
+        button.setBackground(round(color, dp(10), color, 0));
+        return button;
+    }
+
+    private Button circleButton(String value, int color, int sizeDp) {
+        Button button = textButton(value, color);
+        button.setTextSize(19);
+        button.setGravity(Gravity.CENTER);
+        button.setBackground(round(color, dp(sizeDp / 2f), color, 0));
+        button.setLayoutParams(new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
+        return button;
+    }
+
+    private LinearLayout horizontalRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        return row;
+    }
+
+    private GradientDrawable round(int color, float radius, int strokeColor, int strokeWidth) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(radius);
+        if (strokeWidth > 0) drawable.setStroke(strokeWidth, strokeColor);
+        return drawable;
+    }
+
+    private LinearLayout.LayoutParams weighted() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        p.setMargins(dp(3), dp(3), dp(3), dp(3));
+        return p;
+    }
+
+    private LinearLayout.LayoutParams matchWrap() {
+        return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private LinearLayout.LayoutParams wrapCenter() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.gravity = Gravity.CENTER_HORIZONTAL;
+        return p;
+    }
+
+    private LinearLayout.LayoutParams matchWrapWithMargins(int left, int top, int right, int bottom) {
+        LinearLayout.LayoutParams p = matchWrap();
+        p.setMargins(dp(left), dp(top), dp(right), dp(bottom));
+        return p;
+    }
+
+    private int dp(float value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private static String cleanHost(String value) {
+        String host = value == null ? "" : value.trim();
+        host = host.replace("http://", "").replace("https://", "");
