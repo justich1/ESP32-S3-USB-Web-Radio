@@ -1,0 +1,83 @@
+                actionResult(text, error);
+                if (error == null) {
+                    refreshConfig(true);
+                    if (currentPage == Page.RADIO) loadRadioEditor();
+                }
+            });
+            return;
+        }
+
+        if (requestCode == PICK_AUDIO) {
+            playlistUris.clear();
+            playlistNames.clear();
+            ClipData clip = data.getClipData();
+            if (clip != null) {
+                for (int i = 0; i < clip.getItemCount(); i++) addAudioUri(clip.getItemAt(i).getUri(), data.getFlags());
+            } else if (data.getData() != null) {
+                addAudioUri(data.getData(), data.getFlags());
+            }
+            selectedTrackIndex = 0;
+            if (phonePlaylistAdapter != null) phonePlaylistAdapter.notifyDataSetChanged();
+            if (phoneTrackTitle != null) phoneTrackTitle.setText(
+                    playlistNames.isEmpty() ? "Není vybraná skladba" : playlistNames.get(0));
+            setBottomStatus("Vybráno skladeb: " + playlistNames.size(), OK);
+        }
+    }
+
+    private void addAudioUri(Uri uri, int flags) {
+        if (uri == null) return;
+        try {
+            int takeFlags = flags & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            getContentResolver().takePersistableUriPermission(uri, takeFlags);
+        } catch (Exception ignored) {}
+        playlistUris.add(uri);
+        playlistNames.add(displayName(uri));
+    }
+
+    private String displayName(Uri uri) {
+        android.database.Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(uri,
+                    new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) return cursor.getString(index);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+        String last = uri.getLastPathSegment();
+        return last == null ? "Skladba" : last;
+    }
+
+    private void requestSystemAudioCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            toast("Stream systémového zvuku vyžaduje Android 10+");
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_RECORD_AUDIO);
+            return;
+        }
+        pendingLocalPlay = false;
+        streamer.stop();
+        sendspin.close();
+        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_SYSTEM_AUDIO);
+    }
+
+    private void startSystemAudioService(int resultCode, Intent projectionData) {
+        Intent service = new Intent(this, SystemAudioCaptureService.class);
+        service.setAction(SystemAudioCaptureService.ACTION_START);
+        service.putExtra(SystemAudioCaptureService.EXTRA_RESULT_CODE, resultCode);
+        service.putExtra(SystemAudioCaptureService.EXTRA_PROJECTION_DATA, projectionData);
+        service.putExtra(SystemAudioCaptureService.EXTRA_HOST, radioHost);
+        service.putExtra(SystemAudioCaptureService.EXTRA_PORT, sendspinPort);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
+        else startService(service);
+        if (systemAudioStatus != null) systemAudioStatus.setText("Spouštím stream zvuku…");
+    }
+
+    private void stopSystemAudioCapture() {
+        Intent service = new Intent(this, SystemAudioCaptureService.class);
+        service.setAction(SystemAudioCaptureService.ACTION_STOP);
