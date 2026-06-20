@@ -1,16 +1,22 @@
 package cz.oris.mobileaudio;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
+import android.media.projection.MediaProjectionManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.text.InputType;
@@ -33,10 +39,13 @@ import android.widget.Toast;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Locale;
 
 public final class MainActivity extends Activity {
     private static final int PICK_AUDIO = 1001;
+    private static final int REQUEST_SYSTEM_AUDIO = 1002;
+    private static final int REQUEST_RECORD_AUDIO = 1003;
     private static final String SERVICE_TYPE = "_sendspin._tcp.";
     private static final int DEFAULT_SENDSPIN_PORT = 8928;
 
@@ -55,6 +64,8 @@ public final class MainActivity extends Activity {
     private ArrayAdapter<String> playlistAdapter;
     private Spinner radioSpinner;
     private EditText addressEdit;
+    private EditText webUserEdit;
+    private EditText webPassEdit;
     private TextView statusText;
     private TextView trackText;
     private TextView progressText;
@@ -63,11 +74,28 @@ public final class MainActivity extends Activity {
     private SeekBar volumeSeek;
     private Button connectButton;
     private Button pauseButton;
+    private Button systemAudioStartButton;
+    private Button systemAudioStopButton;
+    private TextView systemAudioStatusText;
 
     private SendspinConnection connection;
     private AudioStreamer streamer;
     private int selectedTrackIndex;
     private SharedPreferences preferences;
+    private MediaProjectionManager mediaProjectionManager;
+    private boolean statusReceiverRegistered;
+
+    private final BroadcastReceiver systemAudioStatusReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!SystemAudioCaptureService.ACTION_STATUS.equals(intent.getAction())) return;
+            String status = intent.getStringExtra(SystemAudioCaptureService.EXTRA_STATUS);
+            boolean running = intent.getBooleanExtra(SystemAudioCaptureService.EXTRA_RUNNING, false);
+            if (systemAudioStatusText != null && status != null) systemAudioStatusText.setText(status);
+            if (systemAudioStartButton != null) systemAudioStartButton.setEnabled(!running);
+            if (systemAudioStopButton != null) systemAudioStopButton.setEnabled(running);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -76,6 +104,7 @@ public final class MainActivity extends Activity {
 
         preferences = getSharedPreferences("oris_audio", MODE_PRIVATE);
         nsdManager = (NsdManager) getSystemService(Context.NSD_SERVICE);
+        mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         acquireMulticastLock();
 
         connection = new SendspinConnection(new SendspinConnection.Listener() {
@@ -138,6 +167,7 @@ public final class MainActivity extends Activity {
         });
 
         setContentView(buildUi());
+        registerSystemAudioStatusReceiver();
         startDiscovery();
     }
 
@@ -155,7 +185,7 @@ public final class MainActivity extends Activity {
         content.addView(title, matchWrap());
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Přehrávání skladeb z telefonu přímo do rádia přes Wi‑Fi");
+        subtitle.setText("Kompletní ovládání rádia, hudba z telefonu a stream systémového zvuku");
         subtitle.setTextSize(15);
         subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
         subtitle.setPadding(0, dp(4), 0, dp(16));
@@ -194,6 +224,26 @@ public final class MainActivity extends Activity {
         addressEdit.setText(preferences.getString("radio_address", ""));
         content.addView(addressEdit, matchWrap());
 
+        LinearLayout authRow = horizontalRow();
+
+        webUserEdit = new EditText(this);
+        webUserEdit.setSingleLine(true);
+        webUserEdit.setHint("Web uživatel");
+        webUserEdit.setText(preferences.getString("web_user", "admin"));
+        authRow.addView(webUserEdit, weighted());
+
+        webPassEdit = new EditText(this);
+        webPassEdit.setSingleLine(true);
+        webPassEdit.setHint("Web heslo");
+        webPassEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        webPassEdit.setText(preferences.getString("web_pass", "admin"));
+        authRow.addView(webPassEdit, weighted());
+        content.addView(authRow, matchWrap());
+
+        Button webControlButton = button("Kompletní ovládání rádia");
+        webControlButton.setOnClickListener(v -> openWebControl());
+        content.addView(webControlButton, matchWrap());
+
         connectButton = button("Připojit");
         connectButton.setOnClickListener(v -> toggleConnection());
         content.addView(connectButton, matchWrap());
@@ -210,7 +260,11 @@ public final class MainActivity extends Activity {
             }
 
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                applyVolumeWithHttpFallback(seekBar.getProgress());
+            }
         });
         content.addView(volumeSeek, matchWrap());
 
@@ -272,9 +326,30 @@ public final class MainActivity extends Activity {
         content.addView(playlistView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(260)));
 
+        content.addView(label("Stream zvuku telefonu"), matchWrap());
+
+        systemAudioStatusText = new TextView(this);
+        systemAudioStatusText.setText("Zastaveno. Android se při spuštění zeptá, co smí zachytit.");
+        systemAudioStatusText.setTextSize(14);
+        systemAudioStatusText.setPadding(dp(10), dp(8), dp(10), dp(8));
+        systemAudioStatusText.setBackgroundColor(Color.rgb(240, 244, 248));
+        content.addView(systemAudioStatusText, matchWrap());
+
+        LinearLayout systemAudioRow = horizontalRow();
+        systemAudioStartButton = button("Spustit stream zvuku");
+        systemAudioStartButton.setOnClickListener(v -> requestSystemAudioCapture());
+        systemAudioRow.addView(systemAudioStartButton, weighted());
+
+        systemAudioStopButton = button("Zastavit stream");
+        systemAudioStopButton.setEnabled(false);
+        systemAudioStopButton.setOnClickListener(v -> stopSystemAudioCapture());
+        systemAudioRow.addView(systemAudioStopButton, weighted());
+        content.addView(systemAudioRow, matchWrap());
+
         TextView note = new TextView(this);
-        note.setText("První verze podporuje běžné audio soubory, které umí dekódovat Android. "
-                + "Telefon i rádio musí být ve stejné Wi‑Fi. Během přehrávání nech aplikaci otevřenou.");
+        note.setText("Hudba: přehrává soubory vybrané z telefonu. Stream zvuku: zkusí posílat zvuk "
+                + "jiných aplikací přes Android Audio Playback Capture. Některé aplikace mohou zachycení zakázat. "
+                + "Telefon i rádio musí být ve stejné Wi‑Fi.");
         note.setTextSize(13);
         note.setPadding(0, dp(12), 0, dp(16));
         content.addView(note, matchWrap());
@@ -282,6 +357,111 @@ public final class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
         return scroll;
+    }
+
+    private void openWebControl() {
+        String address = getCurrentAddress();
+        if (address.isEmpty()) {
+            toast("Vyber rádio nebo zadej jeho IP adresu");
+            return;
+        }
+        saveConnectionSettings();
+        Intent intent = new Intent(this, ControlActivity.class);
+        intent.putExtra("radio_address", address);
+        startActivity(intent);
+    }
+
+    private void requestSystemAudioCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            setSystemAudioStatus("Stream systémového zvuku vyžaduje Android 10 nebo novější", false);
+            return;
+        }
+        String address = getCurrentAddress();
+        if (address.isEmpty()) {
+            toast("Vyber rádio nebo zadej jeho IP adresu");
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_RECORD_AUDIO);
+            return;
+        }
+
+        saveConnectionSettings();
+        streamer.stop();
+        connection.close();
+        connectButton.setText("Připojit");
+        setSystemAudioStatus("Čekám na povolení Androidu…", false);
+        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_SYSTEM_AUDIO);
+    }
+
+    private void startSystemAudioService(int resultCode, Intent projectionData) {
+        HostPort hostPort = parseAddress(getCurrentAddress());
+        Intent service = new Intent(this, SystemAudioCaptureService.class);
+        service.setAction(SystemAudioCaptureService.ACTION_START);
+        service.putExtra(SystemAudioCaptureService.EXTRA_RESULT_CODE, resultCode);
+        service.putExtra(SystemAudioCaptureService.EXTRA_PROJECTION_DATA, projectionData);
+        service.putExtra(SystemAudioCaptureService.EXTRA_HOST, hostPort.host);
+        service.putExtra(SystemAudioCaptureService.EXTRA_PORT, hostPort.port);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service);
+        else startService(service);
+        setSystemAudioStatus("Spouštím stream zvuku telefonu…", true);
+    }
+
+    private void stopSystemAudioCapture() {
+        Intent service = new Intent(this, SystemAudioCaptureService.class);
+        service.setAction(SystemAudioCaptureService.ACTION_STOP);
+        startService(service);
+        setSystemAudioStatus("Zastavuji stream…", false);
+    }
+
+    private void registerSystemAudioStatusReceiver() {
+        IntentFilter filter = new IntentFilter(SystemAudioCaptureService.ACTION_STATUS);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(systemAudioStatusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(systemAudioStatusReceiver, filter);
+        }
+        statusReceiverRegistered = true;
+    }
+
+    private void setSystemAudioStatus(String text, boolean running) {
+        if (systemAudioStatusText != null) systemAudioStatusText.setText(text);
+        if (systemAudioStartButton != null) systemAudioStartButton.setEnabled(!running);
+        if (systemAudioStopButton != null) systemAudioStopButton.setEnabled(running);
+    }
+
+    private void applyVolumeWithHttpFallback(int volume) {
+        String address = getCurrentAddress();
+        if (address.isEmpty()) return;
+        HostPort hostPort = parseAddress(address);
+        String user = webUserEdit == null ? "admin" : webUserEdit.getText().toString();
+        String pass = webPassEdit == null ? "admin" : webPassEdit.getText().toString();
+        RadioHttpClient.setVolume(hostPort.host, user, pass, volume, (ok, message) -> {
+            if (!ok) runOnUiThread(() -> setStatus("Hlasitost: " + message));
+        });
+    }
+
+    private String getCurrentAddress() {
+        String address = addressEdit == null ? "" : addressEdit.getText().toString().trim();
+        if (address.isEmpty() && !radios.isEmpty()) {
+            RadioDevice selected = (RadioDevice) radioSpinner.getSelectedItem();
+            if (selected == null) selected = radios.get(0);
+            address = selected.host + ":" + selected.port;
+            addressEdit.setText(address);
+        }
+        return address;
+    }
+
+    private void saveConnectionSettings() {
+        String address = getCurrentAddress();
+        String user = webUserEdit == null ? "admin" : webUserEdit.getText().toString().trim();
+        String pass = webPassEdit == null ? "admin" : webPassEdit.getText().toString();
+        if (user.isEmpty()) user = "admin";
+        preferences.edit()
+                .putString("radio_address", address)
+                .putString("web_user", user)
+                .putString("web_pass", pass)
+                .apply();
     }
 
     private void chooseAudioFiles() {
@@ -295,6 +475,16 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == REQUEST_SYSTEM_AUDIO) {
+            if (resultCode != RESULT_OK || data == null) {
+                setSystemAudioStatus("Sdílení zvuku nebylo povoleno", false);
+                return;
+            }
+            startSystemAudioService(resultCode, data);
+            return;
+        }
+
         if (requestCode != PICK_AUDIO || resultCode != RESULT_OK || data == null) return;
 
         playlistUris.clear();
@@ -318,10 +508,26 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            String[] permissions,
+            int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_RECORD_AUDIO) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                requestSystemAudioCapture();
+            } else {
+                setSystemAudioStatus("Bez oprávnění k záznamu zvuku nelze stream spustit", false);
+            }
+        }
+    }
+
     private void addAudioUri(Uri uri, int flags) {
         if (uri == null) return;
         try {
-            int takeFlags = flags & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            int takeFlags = flags & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             getContentResolver().takePersistableUriPermission(uri, takeFlags);
         } catch (Exception ignored) {
         }
@@ -377,7 +583,7 @@ public final class MainActivity extends Activity {
         }
 
         HostPort hostPort = parseAddress(address);
-        preferences.edit().putString("radio_address", address).apply();
+        saveConnectionSettings();
         connection.connectAsync(hostPort.host, hostPort.port);
     }
 
@@ -613,6 +819,13 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         stopDiscovery();
+        if (statusReceiverRegistered) {
+            try {
+                unregisterReceiver(systemAudioStatusReceiver);
+            } catch (Exception ignored) {
+            }
+            statusReceiverRegistered = false;
+        }
         streamer.stop();
         connection.close();
         try {
