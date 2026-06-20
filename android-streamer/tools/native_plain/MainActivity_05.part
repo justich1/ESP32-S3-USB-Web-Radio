@@ -1,0 +1,163 @@
+            if (!data.optBoolean("available", true)) {
+                filesList.addView(errorBox("Disk není dostupný"), matchWrap());
+                return;
+            }
+            filesPath = data.optString("path", filesPath);
+            filesPathLabel.setText(filesDisk + ": " + filesPath);
+            JSONArray items = data.optJSONArray("items");
+            if (items == null || items.length() == 0) {
+                filesList.addView(text("Složka je prázdná.", 14, MUTED, false), matchWrap());
+                return;
+            }
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.optJSONObject(i);
+                if (item != null) filesList.addView(buildFileRow(item), matchWrapWithMargins(0, 0, 0, 6));
+            }
+        });
+    }
+
+    private View buildFileRow(JSONObject item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(10), dp(10));
+        row.setBackground(round(PANEL, dp(11), LINE, dp(1)));
+
+        boolean dir = item.optBoolean("dir", false);
+        String name = item.optString("name", "");
+        String path = item.optString("path", "");
+        String ext = item.optString("ext", "").toLowerCase(Locale.ROOT);
+
+        TextView icon = text(dir ? "📁" : (ext.equals("mp3") ? "♫" : "•"), 23, TEXT, false);
+        row.addView(icon, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        info.addView(text(name, 15, TEXT, true), matchWrap());
+        if (!dir) info.addView(text(niceBytes(item.optLong("size", 0)), 11, MUTED, false), matchWrap());
+        row.addView(info, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button action = textButton(dir ? "Otevřít" : (ext.equals("mp3") ? "Přehrát" : "Info"),
+                dir || ext.equals("mp3") ? ACCENT : PANEL_3);
+        action.setOnClickListener(v -> {
+            if (dir) {
+                filesPath = path;
+                loadFiles();
+            } else if (ext.equals("mp3") || ext.equals("wav")) {
+                api.getText("/audio/play?disk=" + enc(filesDisk) + "&f=" + enc(path),
+                        (text, error) -> actionResult(text, error));
+            } else {
+                setBottomStatus(path, MUTED);
+            }
+        });
+        row.addView(action, new LinearLayout.LayoutParams(dp(94), dp(46)));
+        return row;
+    }
+
+    private View buildKaraokePage() {
+        LinearLayout body = verticalBody();
+        LinearLayout toolbar = card();
+        toolbar.addView(text("Karaoke knihovna", 20, TEXT, true), matchWrap());
+
+        karaokeDiskSpinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_dropdown_item,
+                new String[]{"Všechny disky", "USB disk", "Interní FFat"}) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                view.setTextColor(TEXT);
+                return view;
+            }
+        };
+        karaokeDiskSpinner.setAdapter(adapter);
+        toolbar.addView(karaokeDiskSpinner, matchWrapWithMargins(0, 8, 0, 0));
+
+        Button load = textButton("Načíst karaoke", ACCENT);
+        load.setOnClickListener(v -> loadKaraoke());
+        toolbar.addView(load, matchWrapWithMargins(0, 8, 0, 0));
+        body.addView(toolbar, matchWrapWithMargins(0, 0, 0, 10));
+
+        karaokeList = new LinearLayout(this);
+        karaokeList.setOrientation(LinearLayout.VERTICAL);
+        body.addView(karaokeList, matchWrap());
+        loadKaraoke();
+        return scroll(body);
+    }
+
+    private void loadKaraoke() {
+        if (karaokeList == null) return;
+        karaokeList.removeAllViews();
+        karaokeList.addView(loading("Hledám karaoke soubory…"), matchWrap());
+        String disk = "all";
+        if (karaokeDiskSpinner != null) {
+            int p = karaokeDiskSpinner.getSelectedItemPosition();
+            if (p == 1) disk = "usb0";
+            else if (p == 2) disk = "ffat";
+        }
+        api.getArray("/karaoke/list.json?disk=" + enc(disk), (items, error) -> {
+            if (karaokeList == null) return;
+            karaokeList.removeAllViews();
+            if (error != null) {
+                karaokeList.addView(errorBox(error.getMessage()), matchWrap());
+                return;
+            }
+            if (items == null || items.length() == 0) {
+                karaokeList.addView(text("Žádné karaoke skladby.", 14, MUTED, false), matchWrap());
+                return;
+            }
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.optJSONObject(i);
+                if (item != null) karaokeList.addView(buildKaraokeRow(item), matchWrapWithMargins(0, 0, 0, 6));
+            }
+        });
+    }
+
+    private View buildKaraokeRow(JSONObject item) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(10), dp(10));
+        row.setBackground(round(PANEL, dp(11), LINE, dp(1)));
+
+        LinearLayout info = new LinearLayout(this);
+        info.setOrientation(LinearLayout.VERTICAL);
+        String name = item.optString("name", fileName(item.optString("path", "Karaoke")));
+        info.addView(text(name, 15, TEXT, true), matchWrap());
+        info.addView(text(item.optString("disk", "") + ": " + item.optString("path", ""), 11, MUTED, false), matchWrap());
+        row.addView(info, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button play = textButton("▶", ACCENT);
+        play.setOnClickListener(v -> playKaraoke(item));
+        row.addView(play, new LinearLayout.LayoutParams(dp(60), dp(46)));
+        return row;
+    }
+
+    private void playKaraoke(JSONObject item) {
+        String disk = item.optString("disk", "usb0");
+        String jsonPath = item.optString("path", "");
+        String fallbackTitle = item.optString("name", fileName(jsonPath));
+        api.getJson("/raw?disk=" + enc(disk) + "&f=" + enc(jsonPath), (doc, error) -> {
+            if (error != null) {
+                setBottomStatus("Karaoke JSON: " + error.getMessage(), DANGER);
+                return;
+            }
+            String audio = firstString(doc, "audio", "Audio");
+            String title = firstString(doc, "title", "Title");
+            if (title.isEmpty()) title = fallbackTitle;
+            Map<String, String> values = new LinkedHashMap<>();
+            values.put("disk", disk);
+            values.put("json", jsonPath);
+            values.put("audio", audio);
+            values.put("title", title);
+            api.postForm("/karaoke/play", values, (text, playError) -> actionResult(text, playError));
+        });
+    }
+
+    private View buildSettingsPage() {
+        LinearLayout body = verticalBody();
+
+        LinearLayout connection = card();
+        connection.addView(text("Připojení k rádiu", 21, TEXT, true), matchWrap());
+        connection.addView(text(
+                "Webové API používá port 80. Sendspin pro zvuk z mobilu používá vlastní port.",
