@@ -8,3 +8,9 @@ source = gzip.decompress(base64.b64decode(payload)).decode("utf-8")
 runtime = root / "tools/apply_v033_runtime.py"
 namespace = {"__name__": "__main__", "__file__": str(runtime)}
 exec(compile(source, str(runtime), "exec"), namespace)
+
+gradle_path = root / "app/build.gradle"
+gradle = gradle_path.read_text(encoding="utf-8")
+gradle = gradle.replace("versionCode 6", "versionCode 7")
+gradle = gradle.replace("versionName '0.3.2'", "versionName '0.3.3'")
+gradle_path.write_text(gradle, encoding="utf-8")
