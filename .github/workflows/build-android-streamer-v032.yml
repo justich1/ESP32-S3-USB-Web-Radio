@@ -1,0 +1,56 @@
+name: Build ORIS Mobile Audio 0.3.2
+
+on:
+  push:
+    branches:
+      - android-audio-streamer
+    paths:
+      - 'android-streamer/**'
+      - '.github/workflows/build-android-streamer-v032.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.4.1'
+      - name: Assemble native base sources
+        run: python3 android-streamer/tools/assemble_native.py
+      - name: Prepare audio and Sendspin
+        run: python3 android-streamer/tools/prepare_native_build.py
+      - name: Apply 0.3.1 native UI and API
+        run: python3 android-streamer/tools/apply_v031.py
+      - name: Apply 0.3.2 changes
+        run: python3 android-streamer/tools/apply_v032.py
+      - name: Build debug APK
+        run: gradle -p android-streamer :app:assembleDebug --stacktrace
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+          cp android-streamer/app/build/outputs/apk/debug/app-debug.apk dist/ORIS-Mobile-Audio-v0.3.2.apk
+          cp -a android-streamer dist/ORIS-Mobile-Audio-v0.3.2-source
+          rm -rf dist/ORIS-Mobile-Audio-v0.3.2-source/app/build dist/ORIS-Mobile-Audio-v0.3.2-source/.gradle
+          cd dist
+          zip -qr ORIS-Mobile-Audio-v0.3.2-source.zip ORIS-Mobile-Audio-v0.3.2-source
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ORIS-Mobile-Audio-v0.3.2-APK
+          path: dist/ORIS-Mobile-Audio-v0.3.2.apk
+          if-no-files-found: error
+      - name: Upload source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ORIS-Mobile-Audio-v0.3.2-source
+          path: dist/ORIS-Mobile-Audio-v0.3.2-source.zip
+          if-no-files-found: error
