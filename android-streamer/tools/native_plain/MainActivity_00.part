@@ -1,0 +1,203 @@
+package cz.oris.mobileaudio;
+
+import android.Manifest;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
+import android.net.nsd.NsdManager;
+import android.net.nsd.NsdServiceInfo;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
+import android.text.InputType;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.GridLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ListView;
+import android.widget.PopupMenu;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.net.InetAddress;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+public final class MainActivity extends Activity {
+    private static final int PICK_AUDIO = 2001;
+    private static final int PICK_STATION_LOGO = 2002;
+    private static final int REQUEST_SYSTEM_AUDIO = 2003;
+    private static final int REQUEST_RECORD_AUDIO = 2004;
+
+    private static final String SERVICE_TYPE = "_sendspin._tcp.";
+    private static final int DEFAULT_SENDSPIN_PORT = 8928;
+
+    private static final int BG = Color.rgb(11, 14, 19);
+    private static final int BG_SOFT = Color.rgb(17, 23, 34);
+    private static final int PANEL = Color.rgb(21, 27, 37);
+    private static final int PANEL_2 = Color.rgb(27, 36, 48);
+    private static final int PANEL_3 = Color.rgb(34, 45, 58);
+    private static final int LINE = Color.rgb(44, 57, 72);
+    private static final int TEXT = Color.rgb(237, 243, 251);
+    private static final int MUTED = Color.rgb(151, 166, 184);
+    private static final int ACCENT = Color.rgb(77, 141, 255);
+    private static final int ACCENT_2 = Color.rgb(114, 167, 255);
+    private static final int DANGER = Color.rgb(216, 74, 74);
+    private static final int OK = Color.rgb(98, 216, 140);
+    private static final int WARN = Color.rgb(242, 199, 92);
+
+    private enum Page {
+        PLAYER("Přehrávač"),
+        RADIO("Internetová rádia"),
+        PHONE_MUSIC("Hudba v mobilu"),
+        SYSTEM_AUDIO("Stream zvuku"),
+        FILES("Soubory rádia"),
+        KARAOKE("Karaoke"),
+        SETTINGS("Nastavení");
+
+        final String title;
+        Page(String title) { this.title = title; }
+    }
+
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ArrayList<Uri> playlistUris = new ArrayList<>();
+    private final ArrayList<String> playlistNames = new ArrayList<>();
+    private final ArrayList<JSONObject> cachedStations = new ArrayList<>();
+    private final LinkedList<NsdServiceInfo> resolveQueue = new LinkedList<>();
+
+    private SharedPreferences preferences;
+    private OrisApi api;
+    private SendspinConnection sendspin;
+    private AudioStreamer streamer;
+    private MediaProjectionManager mediaProjectionManager;
+
+    private LinearLayout root;
+    private FrameLayout pageHost;
+    private TextView pageTitle;
+    private TextView headerConnection;
+    private TextView bottomStatus;
+    private Page currentPage = Page.PLAYER;
+
+    private String radioHost;
+    private int sendspinPort;
+    private String webUser;
+    private String webPassword;
+
+    private JSONObject lastStatus;
+    private JSONObject lastConfig;
+    private int selectedStationIndex = -1;
+    private int selectedTrackIndex = 0;
+    private boolean pendingLocalPlay;
+    private int sendspinRetryCount;
+
+    private ImageView playerCover;
+    private TextView playerMode;
+    private TextView playerMainTitle;
+    private TextView playerSubtitle;
+    private TextView playerDetail;
+    private TextView playerBattery;
+    private Button playerPlayPause;
+    private SeekBar playerVolume;
+    private GridLayout playerStationGrid;
+
+    private LinearLayout radioEditorList;
+    private final ArrayList<EditText> radioNameEditors = new ArrayList<>();
+    private final ArrayList<EditText> radioUrlEditors = new ArrayList<>();
+    private int pendingLogoIndex = -1;
+
+    private ArrayAdapter<String> phonePlaylistAdapter;
+    private ListView phonePlaylistView;
+    private TextView phoneConnectionStatus;
+    private TextView phoneTrackTitle;
+    private TextView phoneProgress;
+    private ProgressBar phoneProgressBar;
+    private Button phonePauseButton;
+
+    private TextView systemAudioStatus;
+    private Button systemAudioStart;
+    private Button systemAudioStop;
+    private boolean statusReceiverRegistered;
+
+    private String filesDisk = "ffat";
+    private String filesPath = "/";
+    private LinearLayout filesList;
+    private TextView filesPathLabel;
+
+    private LinearLayout karaokeList;
+    private Spinner karaokeDiskSpinner;
+
+    private EditText settingsHost;
+    private EditText settingsPort;
+    private EditText settingsUser;
+    private EditText settingsPassword;
+    private TextView settingsTestResult;
+
+    private NsdManager nsdManager;
+    private NsdManager.DiscoveryListener discoveryListener;
+    private WifiManager.MulticastLock multicastLock;
+    private boolean discoveryRunning;
+    private boolean resolving;
+
+    private final BroadcastReceiver systemAudioStatusReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!SystemAudioCaptureService.ACTION_STATUS.equals(intent.getAction())) return;
+            String text = intent.getStringExtra(SystemAudioCaptureService.EXTRA_STATUS);
+            boolean running = intent.getBooleanExtra(SystemAudioCaptureService.EXTRA_RUNNING, false);
+            if (systemAudioStatus != null && text != null) systemAudioStatus.setText(text);
+            if (systemAudioStart != null) systemAudioStart.setEnabled(!running);
+            if (systemAudioStop != null) systemAudioStop.setEnabled(running);
+            setBottomStatus(text == null ? "" : text, running ? OK : MUTED);
+        }
+    };
+
+    private final Runnable statusTicker = new Runnable() {
+        @Override
+        public void run() {
+            refreshStatus(false);
+            mainHandler.postDelayed(this, 1200L);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        getWindow().setStatusBarColor(BG);
+        getWindow().setNavigationBarColor(BG);
