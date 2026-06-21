@@ -1,0 +1,6 @@
+ORIScore radio v0.3.6
+
+- Opraveno posouvání playlistu na stránce Hudba v mobilu.
+- Playlist si během gesta ponechá dotyk a nadřazená stránka mu již nepřebírá posouvání.
+- Zachováno samostatné posouvání celé stránky mimo oblast playlistu.
+- Doplněn viditelný svislý posuvník seznamu.

@@ -1,0 +1,13 @@
+ORIScore radio v0.3.8
+
+- nastavení aplikace rozšířeno na 10pásmový ekvalizér 31 Hz až 16 kHz,
+- každé pásmo má rozsah -12 až +12 dB,
+- přidán EQ preamp -24 až +6 dB,
+- přidána automatická rezerva proti digitálnímu clippingu,
+- přidán maximální výstupní gain -40 až 0 dB,
+- 100 % hlasitosti nyní odpovídá nastavenému výstupnímu gainu,
+- přidána nastavitelná křivka hlasitosti 1.0 až 3.0,
+- přidány presety Rovný, Basy, Mluvené slovo a Loudness,
+- přidáno rychlé nastavení bezpečného gainu -18 dB,
+- zachováno ovládání hlasitosti po 1 % a všechny funkce v0.3.7,
+- versionCode zvýšen na 12, versionName na 0.3.8.

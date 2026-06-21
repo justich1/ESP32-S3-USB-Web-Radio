@@ -1,0 +1,11 @@
+ORIScore radio v0.3.7
+
+- Přidáno spuštění .html a .htm souborů přímo ze stránky Soubory rádia.
+- Není přidána žádná nová hlavní záložka ani stránka menu.
+- Klepnutí na HTML otevře vestavěný přehrávač minihry.
+- Nabídka Akce u HTML obsahuje Spustit HTML / minihru a zachovává Editovat.
+- Virtuální webový kořen překládá relativní soubory na /raw endpoint rádia.
+- Podporované zdroje zahrnují CSS, JavaScript, JSON, obrázky, fonty, zvuk a video.
+- HTML se správně vykreslí i v případě, že /raw vrátí text/plain nebo attachment.
+- Doplněna základní navigace, obnova stránky a respektování systémových lišt.
+- versionCode zvýšen na 11, versionName na 0.3.7.

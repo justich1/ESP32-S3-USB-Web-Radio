@@ -1,0 +1,8 @@
+ORIScore radio v0.3.5
+
+- Hudba v mobilu: import celé složky přes Android Storage Access Framework.
+- Import prochází také podsložky a seřadí nalezené skladby podle názvu/cesty.
+- Přidána volba Opakovat playlist.
+- Přidána volba Náhodné pořadí.
+- Nastavení opakování a náhodného pořadí se ukládá.
+- Ovládání předchozí/další v aplikaci i mediální notifikaci respektuje aktivní pořadí playlistu.

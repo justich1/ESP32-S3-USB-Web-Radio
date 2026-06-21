@@ -1,0 +1,13 @@
+ORIS Mobile Audio v0.3.3
+
+- nová ikona aplikace
+- mediální notifikace s tlačítky předchozí, pauza/přehrát, další a stop
+- přepínání internetových stanic i vzdálených skladeb z notifikace
+- přeskakování skladeb streamovaných z nabídky „Hudba v mobilu“
+- výraznější stav baterie na hlavní stránce
+- hlasitost zobrazená v procentech
+- tlačítka −/+ mění hlasitost přesně po 1 %
+- požadavek na oprávnění k notifikacím na Androidu 13+
+
+Poznámka:
+Režim „Stream zvuku“ zachytávající zvuk jiné aplikace nemůže bez zvláštního přístupu ovládat její předchozí/další skladbu. Má vlastní notifikaci pro zastavení zachytávání.

@@ -1,0 +1,9 @@
+ORIScore radio v0.3.4
+
+- aplikace přejmenována na ORIScore radio
+- opravené překrývání obsahu horní systémovou lištou na Androidu 15 a 16
+- systémové lišty zůstávají viditelné a aplikace respektuje jejich okraje
+- do hlavního menu přidána položka „Otevřít web rádia“
+- web rádia se otevírá ve vestavěném prohlížeči podle uložené IP adresy
+- hlasitost tlačítky −/+ zůstává po 1 %
+- zachována mediální notifikace, stav baterie a ovládání mobilního playlistu
