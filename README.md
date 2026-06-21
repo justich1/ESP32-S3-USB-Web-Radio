@@ -31,7 +31,6 @@ Verze **2.16** přináší výrazné zlepšení práce s USB úložištěm, pře
 * Přidáno přejmenování souborů a složek přímo z webového rozhraní.
 * Přidán web endpoint `/rename`.
 * Upload už zbytečně neflushuje každý blok dat, ale průběžně a na konci přenosu.
-* Přidána podpora karaoke (*.ock), přehrávání přes výstup rádia, text přes web rozhranní.
 * Přidána podpora pro hry html/javascript
 
 ## Funkce
