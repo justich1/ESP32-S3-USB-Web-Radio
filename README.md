@@ -11,6 +11,7 @@ Projekt je určený hlavně jako praktické malé rádio / přehrávač / diagno
 ## Update v2.18 – 2026-06-21
 
 CO JE NOVÉ
+- web radia je nutne nahrat přes ftp a nebo přes nouzovy upload na ffat
 - 10 pásem: 31, 62, 125, 250, 500 Hz, 1, 2, 4, 8 a 16 kHz
 - rozsah každého pásma: -12 až +12 dB
 - EQ preamp: -24 až +6 dB
