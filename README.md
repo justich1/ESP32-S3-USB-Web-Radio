@@ -6,7 +6,7 @@
 
 Internetové rádio a jednoduchý webový MP3 přehrávač pro **ESP32-S3** s USB audio výstupem, webovou správou souborů, podporou USB flash disku, FTP serverem a mDNS názvem v síti.
 
-Projekt je určený hlavně jako praktické malé rádio / přehrávač / diagnostická hračka pro ESP32-S3 s PSRAM. Zvuk nejde přes DAC ani Bluetooth, ale přes **USB audio adaptér** připojený k USB hostu ESP32-S3.
+Projekt je určený hlavně jako praktické malé rádio / přehrávač s PSRAM. Zvuk jde přes **USB audio adaptér** připojený k USB hostu ESP32-S3 a nebo I2S AUDIO.
 
 ## Update v2.18 – 2026-06-21
 
