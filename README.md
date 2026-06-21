@@ -8,6 +8,25 @@ Internetové rádio a jednoduchý webový MP3 přehrávač pro **ESP32-S3** s US
 
 Projekt je určený hlavně jako praktické malé rádio / přehrávač / diagnostická hračka pro ESP32-S3 s PSRAM. Zvuk nejde přes DAC ani Bluetooth, ale přes **USB audio adaptér** připojený k USB hostu ESP32-S3.
 
+## Update v2.18 – 2026-06-21
+
+CO JE NOVÉ
+- 10 pásem: 31, 62, 125, 250, 500 Hz, 1, 2, 4, 8 a 16 kHz
+- rozsah každého pásma: -12 až +12 dB
+- EQ preamp: -24 až +6 dB
+- automatická rezerva proti digitálnímu clippingu
+- maximální výstupní gain: -40 až 0 dB
+- nastavitelná křivka hlasitosti: 1.0 až 3.0
+- nové API: GET /audio/eq.json a POST /audio/eq/save
+- kompatibilita se starým nastavením basů a výšek
+
+DOPORUČENÝ START
+- maximální výstupní gain: -18 dB
+- křivka hlasitosti: 2.0
+- EQ preamp: 0 dB
+- automatická rezerva: zapnutá
+- všechna pásma: 0 dB
+
 ## Update v2.16 – multitasking, FTP správa souborů a web rename
 
 Verze **2.16** přináší výrazné zlepšení práce s USB úložištěm, přehráváním MP3 a internetovým rádiem. Hlavním cílem bylo zabránit tomu, aby kopírování souborů přes FTP nebo web blokovalo přehrávání.
