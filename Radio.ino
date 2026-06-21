@@ -2838,53 +2838,6 @@ uint32_t currentSendspinPositionMs() {
   return (uint32_t)calculated;
 }
 
-bool serveConfigPageWithSmartSpeakerPanel() {
-  if (!checkWebAuth()) return false;
-
-  const char* path = "/www/config.html";
-  if (!FFat.exists(path)) {
-    server.sendHeader("Location", "/rescue");
-    server.send(303);
-    return false;
-  }
-
-  File file = FFat.open(path, FILE_READ);
-  if (!file || file.isDirectory()) {
-    if (file) file.close();
-    server.send(500, "text/plain; charset=utf-8", "Konfiguraci nelze otevřít");
-    return false;
-  }
-
-  String page = file.readString();
-  file.close();
-
-  String panel;
-  panel.reserve(1400);
-  panel += "<section id='oris-smart-speaker-panel' style='margin:18px auto;padding:18px;max-width:900px;";
-  panel += "border:1px solid rgba(127,127,127,.35);border-radius:14px'>";
-  panel += "<h2 style='margin-top:0'>Síťový reproduktor</h2>";
-  panel += "<form method='post' action='/smart-speaker/save'>";
-  panel += "<label style='display:flex;gap:10px;align-items:center'>";
-  panel += "<input type='checkbox' name='enabled' value='1'";
-  if (cfg.smartSpeakerEnabled) panel += " checked";
-  panel += "> <strong>Zapnout Sendspin síťový reproduktor</strong></label>";
-  panel += "<p>Název zařízení: <code>" + htmlEscape(normalizeMdnsName(cfg.mdnsName)) + "</code>. ";
-  panel += "Music Assistant jej hledá na portu " + String(SENDSPIN_PORT) + ".</p>";
-  panel += "<p>Stav: <strong>" + htmlEscape(sendspinStatus) + "</strong></p>";
-  panel += "<button type='submit'>Uložit síťový reproduktor</button>";
-  panel += "</form></section>";
-
-  int insertAt = page.lastIndexOf("</main>");
-  if (insertAt < 0) insertAt = page.lastIndexOf("</body>");
-  if (insertAt < 0) page += panel;
-  else page = page.substring(0, insertAt) + panel + page.substring(insertAt);
-
-  server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-  server.sendHeader("Pragma", "no-cache");
-  server.send(200, "text/html; charset=utf-8", page);
-  return true;
-}
-
 void handleSmartSpeakerSave() {
   if (!checkWebAuth()) return;
 
@@ -7022,9 +6975,8 @@ void handleWifiDelete() {
 // ============================================================
 
 void handleConfigPage() {
-  serveConfigPageWithSmartSpeakerPanel();
+  serveWebPage("/www/config.html");
 }
-
 
 void handleConfigSave() {
   String apSsid = server.arg("ap_ssid");
