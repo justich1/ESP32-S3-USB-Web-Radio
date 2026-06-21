@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Přehrávač · ORIS radio</title>
+  <link rel="stylesheet" href="/www/style.css">
+  <script defer src="/www/app.js"></script>
+  <script defer src="/www/home.js?v=2"></script>
+</head>
+<body>
+<main class="home-main">
+  <section class="player-card">
+    <div class="player-visual">
+      <div class="now-playing-badge" id="homeMode">PŘIPRAVENO</div>
+      <div class="cover-frame">
+        <img id="homeCover" src="/www/icons/radio.svg" alt="Aktuální přehrávání">
+      </div>
+      <div class="battery-widget" id="homeBatteryWidget" title="Stav baterie">
+        <div class="battery-body">
+          <div id="homeBatteryFill" class="battery-fill"></div>
+          <span id="homeBatteryPercent">--</span>
+        </div>
+        <div class="battery-cap"></div>
+        <div class="battery-meta" id="homeBatteryVoltage">Měření vypnuto</div>
+      </div>
+    </div>
+
+    <div class="player-info">
+      <div class="eyebrow">ORIS RADIO</div>
+      <h1 id="homeTitle">Přehrávač připraven</h1>
+      <p id="homeSubtitle" class="player-subtitle">Vyber stanici a spusť přehrávání.</p>
+      <div id="homeAudioStatus" class="player-status" data-audio-status>Načítám stav…</div>
+
+      <div class="player-controls">
+        <button class="round-control secondary" type="button" onclick="return homePreviousStation()" aria-label="Předchozí stanice nebo skladba">⏮</button>
+        <button id="homePlayPause" class="round-control primary-control" type="button" onclick="return homeTogglePlay()" aria-label="Přehrát nebo pozastavit">▶</button>
+        <button class="round-control secondary" type="button" onclick="return homeNextStation()" aria-label="Další stanice nebo skladba">⏭</button>
+        <button class="round-control danger" type="button" onclick="return homeStop()" aria-label="Zastavit">■</button>
+      </div>
+
+      <div class="volume-block">
+        <div class="volume-head"><span>Hlasitost</span><strong data-audio-volume-label>0 %</strong></div>
+        <input type="range" min="0" max="100" value="0" data-audio-volume-range oninput="setAudioVolume(this.value)">
+      </div>
+    </div>
+  </section>
+
+  <section class="station-section">
+    <div class="section-title-row">
+      <div><h2>Stanice</h2><p>Jedním klepnutím přepneš rádio.</p></div>
+      <a class="button secondary" href="/radio">Upravit stanice a loga</a>
+    </div>
+    <div id="homeStations" class="station-switcher"><div class="loading">Načítám stanice…</div></div>
+  </section>
+</main>
+</body>
+</html>

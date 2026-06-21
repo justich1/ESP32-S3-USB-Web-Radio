@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Rádio · ORIS radio</title>
+  <link rel="stylesheet" href="/www/style.css">
+  <script defer src="/www/app.js"></script>
+  <script defer src="/www/radio.js"></script>
+</head>
+<body>
+<main>
+  <div class="page-head"><div><h1>Internetové rádio</h1><p>Stanice, streamy a jejich loga pro hlavní přehrávač.</p></div><a class="button secondary" href="/">Otevřít přehrávač</a></div>
+  <div class="card"><h2>Přehrávání</h2><p><b>Stav:</b> <span data-audio-status>Načítám…</span></p><label>Hlasitost: <span data-audio-volume-label>0 %</span></label><input type="range" min="0" max="100" value="0" data-audio-volume-range oninput="setAudioVolume(this.value)"><div class="button-row"><button class="secondary" onclick="return stopAudioAjax()">Stop</button><button class="secondary" onclick="return audioAction('/audio/toggle_pause')">Play / pauza</button></div></div>
+  <div class="card">
+    <h2>Stanice a loga</h2>
+    <form id="radioForm" method="POST" action="/radio/save">
+      <div id="radioStations" class="table-wrap"><div class="loading">Načítám stanice…</div></div>
+      <button type="submit" style="margin-top:14px">Uložit názvy a URL</button>
+    </form>
+    <p class="small">Logo: PNG, JPG, WEBP, GIF nebo SVG, maximálně 512 KB. Obrázky se ukládají do <span class="code">/www/logos</span>.</p>
+    <p class="small">Podpora streamu: čistý HTTP MP3. Redirect, playlist a AAC zatím ne.</p>
+  </div>
+</main>
+</body>
+</html>

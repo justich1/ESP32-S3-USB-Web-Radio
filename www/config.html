@@ -1,0 +1,77 @@
+<!doctype html><html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Konfigurace · ORIS radio</title><link rel="stylesheet" href="/www/style.css"><script defer src="/www/app.js"></script><script defer src="/www/config.js"></script></head><body>
+<main>
+  <div class="page-head"><div><h1>Konfigurace</h1><p>Síť, přístupy, audio a stav zařízení.</p></div><div class="button-row"><form method="POST" action="/reboot" onsubmit="return confirm('Restartovat ESP32?')"><button class="secondary" type="submit">Restartovat ESP32</button></form></div></div>
+  <div id="statusCards" class="grid"><div class="loading">Načítám stav…</div></div>
+
+  <div class="card">
+    <h2>Uložené Wi-Fi sítě</h2>
+    <p class="small">STA se automaticky připojí k nejsilnější známé síti. Chování AP hotspotu nastavíš níže.</p>
+    <div class="button-row"><button id="wifiScanButton" class="secondary" type="button" onclick="return startWifiScan()">Vyhledat okolní sítě</button><span id="wifiScanStatus" class="small"></span></div>
+    <label>Nalezené sítě</label><select id="wifiScanList" onchange="document.getElementById('wifiSsidInput').value=this.value"><option value="">Nejdřív spusť vyhledávání</option></select>
+    <form method="POST" action="/wifi/add" class="form-grid">
+      <div><label>SSID</label><input id="wifiSsidInput" name="ssid" maxlength="32" placeholder="Název Wi-Fi"></div>
+      <div><label>Heslo</label><input name="pass" type="password" maxlength="64" placeholder="U existující sítě prázdné = ponechat původní"></div>
+      <div class="full"><button type="submit">Přidat / aktualizovat a připojit</button></div>
+    </form>
+    <div id="savedWifiList" class="table-wrap" style="margin-top:14px"><div class="loading">Načítám…</div></div>
+  </div>
+
+  <form id="configForm" method="POST" action="/config/save">
+    <div class="card"><h2>AP hotspot a mDNS</h2><div class="form-grid"><div><label>Režim AP</label><select name="ap_mode"><option value="0">Vždy zapnuto</option><option value="1">Jen bez připojené Wi-Fi</option><option value="2">Vždy vypnuto</option></select></div><div><label>AP SSID</label><input name="ap_ssid" required></div><div><label>AP heslo</label><input name="ap_pass" type="password"></div><div><label>mDNS jméno</label><input name="mdns_name" placeholder="oris-radio"></div><div class="full"><label>Adresa</label><input id="mdnsUrl" readonly></div><div class="full small">V automatickém režimu se AP vypne až po stabilním připojení STA a při výpadku Wi-Fi znovu naběhne. Heslo musí mít alespoň 8 znaků; prázdné znamená otevřený hotspot.</div></div></div>
+    <div class="card"><h2>Web a FTP</h2><div class="form-grid"><div><label>Web uživatel</label><input name="web_user" required></div><div><label>Web heslo</label><input name="web_pass" type="password" required></div><div><label>FTP uživatel</label><input name="ftp_user"></div><div><label>FTP heslo</label><input name="ftp_pass" type="password"></div><div><label>FTP disk</label><select name="ftp_disk"><option value="ffat">Interní FFat</option><option value="usb0">USB disk</option></select></div><div><label><input type="checkbox" name="ftp_enabled" value="1"> Zapnout FTP server</label><div class="small">Port 21, PASV 50009.</div></div></div></div>
+    <div class="card">
+      <h2>Zvuk, gain a 10pásmový ekvalizér</h2>
+      <label><input type="checkbox" name="rgb_enabled" value="1"> RGB LED podle hudby</label>
+      <label>Hlasitost: <span id="configAudioVolumeLabel" data-audio-volume-label>0 %</span></label>
+      <input type="range" min="0" max="100" name="audio_volume" data-audio-volume-range oninput="updateConfigVolume(this.value)">
+      <div class="form-grid">
+        <div><label>Maximální výstupní gain: <span id="audioOutputGainLabel">−12 dB</span></label><input id="audioOutputGainRange" type="range" min="-40" max="0" step="1" name="audio_output_gain_db" oninput="updateEqLabels()"><div class="small">100 % hlasitosti odpovídá tomuto stropu. Pro silný zesilovač začni na −18 až −12 dB.</div></div>
+        <div><label>Křivka hlasitosti: <span id="audioVolumeCurveLabel">1.8×</span></label><input id="audioVolumeCurveRange" type="range" min="1" max="3" step="0.1" name="audio_volume_curve" oninput="updateEqLabels()"><div class="small">Vyšší hodnota zjemní rozsah kolem 10–40 %. 1.0 je původní lineární průběh.</div></div>
+        <div><label>Ekvalizér</label><select name="audio_eq_enabled"><option value="1">Zapnutý</option><option value="0">Vypnutý</option></select></div>
+        <div><label>EQ preamp: <span id="audioEqPreampLabel">0 dB</span></label><input id="audioEqPreampRange" type="range" min="-24" max="6" step="1" name="audio_eq_preamp_db" oninput="updateEqLabels()"></div>
+        <div><label>Automatická rezerva proti clippingu</label><select name="audio_eq_auto_headroom"><option value="1">Zapnutá</option><option value="0">Vypnutá</option></select></div>
+      </div>
+      <div class="button-row eq-presets">
+        <button class="secondary" type="button" onclick="applyEqPreset('flat')">Rovný</button>
+        <button class="secondary" type="button" onclick="applyEqPreset('bass')">Basy</button>
+        <button class="secondary" type="button" onclick="applyEqPreset('voice')">Mluvené slovo</button>
+        <button class="secondary" type="button" onclick="applyEqPreset('loudness')">Loudness</button>
+        <button class="secondary" type="button" onclick="applySafeGain()">Bezpečný gain</button>
+      </div>
+      <div class="eq-grid"><div class="eq-band"><label>31 Hz: <span id="eqBandLabel0">0 dB</span></label><input id="eqBandRange0" type="range" min="-12" max="12" step="1" name="audio_eq_band_0" oninput="updateEqLabels()"></div><div class="eq-band"><label>62 Hz: <span id="eqBandLabel1">0 dB</span></label><input id="eqBandRange1" type="range" min="-12" max="12" step="1" name="audio_eq_band_1" oninput="updateEqLabels()"></div><div class="eq-band"><label>125 Hz: <span id="eqBandLabel2">0 dB</span></label><input id="eqBandRange2" type="range" min="-12" max="12" step="1" name="audio_eq_band_2" oninput="updateEqLabels()"></div><div class="eq-band"><label>250 Hz: <span id="eqBandLabel3">0 dB</span></label><input id="eqBandRange3" type="range" min="-12" max="12" step="1" name="audio_eq_band_3" oninput="updateEqLabels()"></div><div class="eq-band"><label>500 Hz: <span id="eqBandLabel4">0 dB</span></label><input id="eqBandRange4" type="range" min="-12" max="12" step="1" name="audio_eq_band_4" oninput="updateEqLabels()"></div><div class="eq-band"><label>1 kHz: <span id="eqBandLabel5">0 dB</span></label><input id="eqBandRange5" type="range" min="-12" max="12" step="1" name="audio_eq_band_5" oninput="updateEqLabels()"></div><div class="eq-band"><label>2 kHz: <span id="eqBandLabel6">0 dB</span></label><input id="eqBandRange6" type="range" min="-12" max="12" step="1" name="audio_eq_band_6" oninput="updateEqLabels()"></div><div class="eq-band"><label>4 kHz: <span id="eqBandLabel7">0 dB</span></label><input id="eqBandRange7" type="range" min="-12" max="12" step="1" name="audio_eq_band_7" oninput="updateEqLabels()"></div><div class="eq-band"><label>8 kHz: <span id="eqBandLabel8">0 dB</span></label><input id="eqBandRange8" type="range" min="-12" max="12" step="1" name="audio_eq_band_8" oninput="updateEqLabels()"></div><div class="eq-band"><label>16 kHz: <span id="eqBandLabel9">0 dB</span></label><input id="eqBandRange9" type="range" min="-12" max="12" step="1" name="audio_eq_band_9" oninput="updateEqLabels()"></div></div>
+      <p class="small">Pásma: 31 Hz až 16 kHz, rozsah −12 až +12 dB. Kladné zdvihy nech s automatickou rezervou nebo sniž EQ preamp. Nastavení platí pro rádio, soubory, USB výstup i Sendspin.</p>
+    </div>
+    <div class="card"><h2>Stav baterie</h2><label><input type="checkbox" name="battery_enabled" value="1"> Zapnout měření baterie na GPIO1</label><div class="form-grid"><div><label>Poměr napěťového děliče</label><input type="number" name="battery_divider_ratio" min="1" max="10" step="0.001" value="2.000"></div><div><label>Kalibrační násobek</label><input type="number" name="battery_calibration" min="0.5" max="1.5" step="0.001" value="1.000"></div></div><p class="small">Pro dělič 100 kΩ / 100 kΩ nastav poměr 2.000. Zapojení: BAT+ → 100 kΩ → GPIO1 → 100 kΩ → GND a 100 nF z GPIO1 na GND. Dokud dělič není připojený, nech měření vypnuté.</p></div>
+    <div class="card"><h2>Výchozí internetové rádio</h2><div class="form-grid"><div><label>Název stanice</label><input name="radio_name"></div><div><label>HTTP MP3 URL</label><input name="radio_url" placeholder="http://server/stream.mp3"></div></div></div>
+    <button type="submit">Uložit konfiguraci</button>
+  </form>
+
+<section class="card">
+  <h2>Síťový reproduktor</h2>
+
+  <form method="POST" action="/smart-speaker/save">
+    <label class="check-row">
+      <input
+        type="checkbox"
+        id="smartSpeakerEnabled"
+        name="enabled"
+        value="1"
+      >
+      <span>Zapnout síťový reproduktor Sendspin</span>
+    </label>
+
+    <p class="muted">
+      Název reproduktoru:
+      <strong id="smartSpeakerName">—</strong>
+    </p>
+
+    <p class="muted">
+      Stav:
+      <strong id="smartSpeakerStatus">—</strong>
+    </p>
+
+    <button type="submit">Uložit</button>
+  </form>
+</section>
+
+</main></body></html>

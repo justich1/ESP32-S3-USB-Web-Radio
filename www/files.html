@@ -1,0 +1,18 @@
+<!doctype html><html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Soubory · ORIS radio</title><link rel="stylesheet" href="/www/style.css"><script defer src="/www/app.js"></script><script defer src="/www/files.js"></script></head><body>
+<main>
+  <div class="page-head"><div><h1>Správce souborů</h1><p>Interní FFat, USB flashka, přehrávání a nahrávání.</p></div></div>
+  <div class="explorer">
+    <aside class="sidebar">
+      <div class="sidebar-section"><h3>Disk</h3><select id="diskSelect"><option value="ffat">Interní FFat</option><option value="usb0">USB disk</option></select><button id="openDiskButton" type="button">Otevřít disk</button><button id="usbRemountButton" class="secondary" type="button">USB remount</button></div>
+      <div class="sidebar-section"><h3>Rychlé cesty</h3><div class="button-row"><a id="rootLink" class="button ghost" href="#">/ root</a><a id="parentLink" class="button ghost" href="#">⬆ nahoru</a></div><p id="diskHint" class="small"></p></div>
+      <div class="sidebar-section"><h3>Audio</h3><div class="small">Stav</div><div data-audio-status id="audioMiniStatus">Načítám…</div><label>Hlasitost: <span data-audio-volume-label>0 %</span></label><input type="range" min="0" max="100" value="0" data-audio-volume-range oninput="setAudioVolume(this.value)"><div class="button-row"><button class="secondary" onclick="return audioAction('/audio/prev')">⏮</button><button class="secondary" onclick="return audioAction('/audio/next')">⏭</button><button class="secondary" onclick="return stopAudioAjax()">Stop</button></div></div>
+      <div class="sidebar-section"><h3>Vytvořit</h3><label>Nová složka</label><input id="mkdirName" placeholder="Název složky"><button id="mkdirButton" type="button">Vytvořit složku</button><label>Nový soubor</label><input id="createName" placeholder="soubor.txt"><button id="createButton" type="button">Vytvořit soubor</button></div>
+      <div class="sidebar-section"><h3>Údržba</h3><div id="formatFfatBox"><input id="formatConfirm" placeholder="Napiš FORMAT"><button id="formatButton" class="danger" type="button">Formát FFat</button></div><p id="usbFormatHint" class="small warn" hidden>USB formátuj v PC jako FAT32.</p></div>
+    </aside>
+    <section class="filepane">
+      <div class="pathbar"><div id="pathTitle" class="path">Načítám…</div><div><a href="/config">Nastavení</a></div></div>
+      <div class="toolbar"><button id="playFolderButton" class="secondary" type="button">▶ Přehrát složku</button><form id="uploadForm" method="POST" enctype="multipart/form-data" onsubmit="return uploadWithModal(this)"><input type="file" name="file"><button type="submit">Nahrát</button></form></div>
+      <div id="fileList" class="filelist"><div class="loading">Načítám obsah…</div></div>
+    </section>
+  </div>
+</main></body></html>
